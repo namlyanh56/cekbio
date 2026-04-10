@@ -1,0 +1,28 @@
+{
+  "name": "panorama-cek-bio",
+  "version": "1.0.0",
+  "description": "Telegram bot untuk cek nomor WhatsApp (Meta Verified, OBA, dll)",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "clean": "rm -rf dist sessions panorama_data"
+  },
+  "keywords": ["whatsapp", "telegram-bot", "baileys", "meta-verified"],
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {
+    "@hapi/boom": "^10.0.1",
+    "@whiskeysockets/baileys": "^6.7.5",
+    "exceljs": "^4.4.0",
+    "p-limit": "^3.1.0",
+    "pino": "^8.17.2",
+    "telegraf": "^4.16.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  }
+}
