@@ -238,6 +238,13 @@ bot.action(/^pair_try_(.+)$/, async (ctx) => {
   if (!b) return ctx.answerCbQuery("Bot tidak ditemukan");
 
   try {
+    // Pastikan session menyala sebelum request pairing code.
+    // Jika bot restart, sessionnya di engine hilang, kita harus recreate
+    const info = engine.getSessionPairingInfo(sessionId);
+    if (!info) {
+        return ctx.answerCbQuery("Sesi tidak aktif. Silakan hapus dan tambah ulang nomor bot.", { show_alert: true });
+    }
+
     const code = await engine.retryPairingCode(sessionId, b.phoneNumber);
     upsertBot(ctx.from.id, {
       ...b,
@@ -284,6 +291,17 @@ bot.action(/^pair_cancel_(.+)$/, async (ctx) => {
   });
 });
 
+bot.action(/^start_bot_(.+)$/, async (ctx) => {
+    const match = ctx.match as RegExpExecArray;
+    const sessionId = match[1];
+    const user = getUser(ctx.from.id);
+    const b = user?.bots.find((x) => x.id === sessionId);
+    if (!b) return ctx.answerCbQuery("Bot tidak ditemukan");
+
+    await ctx.answerCbQuery("Memulai ulang bot...");
+    await startUserBotSession(ctx, ctx.from.id, b.phoneNumber, sessionId);
+});
+
 /* ===== Bot List ===== */
 
 bot.action("menu_daftar_bot", async (ctx) => {
@@ -321,23 +339,31 @@ bot.action(/^detail_bot_(.+)$/, async (ctx) => {
   if (!b) return ctx.answerCbQuery("Bot tidak ditemukan");
 
   const isRuntimeConnected = engine.isSessionConnected(b.id);
+  const engineInfo = engine.getSessionPairingInfo(b.id);
 
   const detailText =
     `🔍 *Detail Bot*\n` +
     `Nomor: ${b.phoneNumber}\n` +
     `Aktif DB: ${b.isActive ? "Ya" : "Tidak"}\n` +
-    `Status Pairing: ${b.pairingStatus ?? "idle"}\n` +
+    `Status Pairing (DB): ${b.pairingStatus ?? "idle"}\n` +
+    `Status Pairing (Runtime): ${engineInfo?.pairingStatus ?? "Offline"}\n` +
     `Runtime Connected: ${isRuntimeConnected ? "Ya" : "Tidak"}\n` +
     `Last Error: ${b.lastError ?? "-"}`;
 
+  const kbd = [];
+  if (!isRuntimeConnected) {
+    kbd.push([Markup.button.callback("▶️ Start / Restart Bot", `start_bot_${sessionId}`)]);
+  }
+  kbd.push([
+    Markup.button.callback("🔁 Try Again", `pair_try_${sessionId}`),
+    Markup.button.callback("🛑 Cancel", `pair_cancel_${sessionId}`)
+  ]);
+  kbd.push([Markup.button.callback("🗑 Hapus Bot", `delete_bot_${sessionId}`)]);
+  kbd.push([Markup.button.callback("🔙 Kembali", "menu_daftar_bot")]);
+
   await ctx.editMessageText(detailText, {
     parse_mode: "Markdown",
-    ...Markup.inlineKeyboard([
-      [Markup.button.callback("🔁 Try Again", `pair_try_${sessionId}`)],
-      [Markup.button.callback("🛑 Cancel", `pair_cancel_${sessionId}`)],
-      [Markup.button.callback("🗑 Hapus Bot", `delete_bot_${sessionId}`)],
-      [Markup.button.callback("🔙 Kembali", "menu_daftar_bot")],
-    ]),
+    ...Markup.inlineKeyboard(kbd),
   });
 });
 
@@ -370,7 +396,7 @@ bot.action("mode_user", async (ctx) => {
   const actives = user.bots.filter((b) => b.isActive && engine.isSessionConnected(b.id));
 
   if (actives.length === 0) {
-    await ctx.editMessageText("❌ Tidak ada bot aktif.", {
+    await ctx.editMessageText("❌ Tidak ada bot aktif yang terhubung (Online).", {
       ...Markup.inlineKeyboard([[Markup.button.callback("🤖 Daftar Bot", "menu_daftar_bot")]]),
     });
     return;
@@ -395,7 +421,7 @@ bot.action(/^select_bot_(.+)$/, async (ctx) => {
   const b = user?.bots.find((x) => x.id === sessionId);
   if (!b) return;
   if (!(b.isActive && engine.isSessionConnected(b.id))) {
-    return ctx.answerCbQuery("Bot belum aktif");
+    return ctx.answerCbQuery("Bot belum aktif / tidak terhubung");
   }
 
   ctx.session.pendingCheck = { mode: "user", botId: b.id, botPhone: b.phoneNumber };
@@ -493,8 +519,72 @@ async function initGlobalSession() {
       return;
     }
   } catch {
-    // Session doesn't exist yet, will be created on demand
+    //
   }
+}
+
+/* ===== Session Builder Helper ===== */
+
+async function startUserBotSession(ctx: Context, userId: number, phone: string, sessionId: string) {
+    const config: SessionConfig = {
+      sessionId,
+      senderType: "user_sender",
+      label: `User ${userId}`,
+    };
+
+    const options: InitSessionOptions = {
+      phoneNumber: phone,
+      onPairingCode: async (_sid, code) => {
+        upsertBot(userId, {
+          id: sessionId,
+          phoneNumber: phone,
+          isActive: false,
+          addedAt: new Date().toISOString(),
+          pairingStatus: "code_sent",
+          lastPairingCode: code,
+          lastPairingAt: new Date().toISOString(),
+          lastError: null,
+        });
+
+        await ctx.reply(`🔐 Pairing (${phone}): \`${code}\``, {
+          parse_mode: "Markdown",
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback("🔁 Try Again", `pair_try_${sessionId}`)],
+            [Markup.button.callback("🛑 Cancel", `pair_cancel_${sessionId}`)],
+          ]),
+        });
+      },
+      onConnected: async () => {
+        upsertBot(userId, {
+          id: sessionId,
+          phoneNumber: phone,
+          isActive: true,
+          addedAt: new Date().toISOString(),
+          pairingStatus: "connected",
+          lastError: null,
+        });
+        await ctx.reply(`✅ ${phone} berhasil terhubung dan siap digunakan.`);
+      },
+      onFailed: async (_sid, reason) => {
+        upsertBot(userId, {
+          id: sessionId,
+          phoneNumber: phone,
+          isActive: false,
+          addedAt: new Date().toISOString(),
+          pairingStatus: "failed",
+          lastError: reason,
+        });
+        await ctx.reply(
+          `❌ Pairing gagal/terputus untuk ${phone}: ${reason}`,
+          Markup.inlineKeyboard([
+            [Markup.button.callback("🔁 Try Again", `pair_try_${sessionId}`)],
+            [Markup.button.callback("🛑 Cancel", `pair_cancel_${sessionId}`)],
+          ])
+        );
+      },
+    };
+
+    await engine.createSession(config, options);
 }
 
 /* ===== Text handler ===== */
@@ -541,29 +631,39 @@ bot.on(message("text"), async (ctx) => {
     if (!/^\d{8,15}$/.test(phone)) return ctx.reply("❌ Format nomor salah.");
 
     const user = getUser(userId);
-    if (!user) {
-      return ctx.reply("❌ User tidak ditemukan.");
-    }
+    if (!user) return ctx.reply("❌ User tidak ditemukan.");
 
     const existing = user.bots.find((b) => b.phoneNumber === phone);
 
-    // Case 1: Nomor sudah ada dan sudah connected
-    if (existing && existing.isActive && engine.isSessionConnected(existing.id)) {
-      return ctx.reply("❌ Nomor sudah terdaftar & aktif.");
+    if (existing) {
+        const isConnected = engine.isSessionConnected(existing.id);
+
+        // Case 1: Sudah ada dan terhubung dengan baik
+        if (existing.isActive && isConnected) {
+            return ctx.reply("❌ Nomor sudah terdaftar & aktif.");
+        }
+
+        // Case 2: Sudah ada tapi disconnected (misal bot baru restart)
+        if (existing.isActive && !isConnected) {
+             return ctx.reply(
+                `⚠️ Nomor sudah terdaftar tapi sedang offline.\nSilakan jalankan ulang bot.`,
+                Markup.inlineKeyboard([
+                  [Markup.button.callback("▶️ Start / Restart Bot", `start_bot_${existing.id}`)]
+                ])
+             );
+        }
+
+        // Case 3: Statusnya masih pending/failed, berikan Try Again / Cancel
+        return ctx.reply(
+            `⚠️ Nomor sudah ada tapi belum terhubung (Status: ${existing.pairingStatus ?? "unknown"}).`,
+            Markup.inlineKeyboard([
+                [Markup.button.callback("🔁 Try Again", `pair_try_${existing.id}`)],
+                [Markup.button.callback("🛑 Cancel", `pair_cancel_${existing.id}`)],
+            ])
+        );
     }
 
-    // Case 2: Nomor sudah ada tapi pending/failed => tampilkan Try Again/Cancel
-    if (existing && !existing.isActive) {
-      return ctx.reply(
-        `⚠️ Nomor sudah ada tapi belum connected (${existing.pairingStatus ?? "unknown"}).`,
-        Markup.inlineKeyboard([
-          [Markup.button.callback("🔁 Try Again", `pair_try_${existing.id}`)],
-          [Markup.button.callback("🛑 Cancel", `pair_cancel_${existing.id}`)],
-        ])
-      );
-    }
-
-    // Case 3: Nomor baru => buat session baru
+    // Nomor baru
     const sessionId = `user_${userId}_${phone}`;
     upsertBot(userId, {
       id: sessionId,
@@ -576,65 +676,7 @@ bot.on(message("text"), async (ctx) => {
       lastError: null,
     });
 
-    const config: SessionConfig = {
-      sessionId,
-      senderType: "user_sender",
-      label: `User ${userId}`,
-    };
-
-    const options: InitSessionOptions = {
-      phoneNumber: phone,
-      onPairingCode: async (_sid, code) => {
-        upsertBot(userId, {
-          id: sessionId,
-          phoneNumber: phone,
-          isActive: false,
-          addedAt: new Date().toISOString(),
-          pairingStatus: "code_sent",
-          lastPairingCode: code,
-          lastPairingAt: new Date().toISOString(),
-          lastError: null,
-        });
-
-        await ctx.reply(`🔐 Pairing (${phone}): \`${code}\``, {
-          parse_mode: "Markdown",
-          ...Markup.inlineKeyboard([
-            [Markup.button.callback("🔁 Try Again", `pair_try_${sessionId}`)],
-            [Markup.button.callback("🛑 Cancel", `pair_cancel_${sessionId}`)],
-          ]),
-        });
-      },
-      onConnected: async () => {
-        upsertBot(userId, {
-          id: sessionId,
-          phoneNumber: phone,
-          isActive: true,
-          addedAt: new Date().toISOString(),
-          pairingStatus: "connected",
-          lastError: null,
-        });
-        await ctx.reply(`✅ ${phone} berhasil terhubung.`);
-      },
-      onFailed: async (_sid, reason) => {
-        upsertBot(userId, {
-          id: sessionId,
-          phoneNumber: phone,
-          isActive: false,
-          addedAt: new Date().toISOString(),
-          pairingStatus: "failed",
-          lastError: reason,
-        });
-        await ctx.reply(
-          `❌ Pairing gagal: ${reason}`,
-          Markup.inlineKeyboard([
-            [Markup.button.callback("🔁 Try Again", `pair_try_${sessionId}`)],
-            [Markup.button.callback("🛑 Cancel", `pair_cancel_${sessionId}`)],
-          ])
-        );
-      },
-    };
-
-    await engine.createSession(config, options);
+    await startUserBotSession(ctx, userId, phone, sessionId);
     return;
   }
 
