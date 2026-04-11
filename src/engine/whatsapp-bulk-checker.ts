@@ -5,12 +5,15 @@ import makeWASocket, {
   WABusinessProfile,
   WASocket,
 } from "@whiskeysockets/baileys";
-import { makeInMemoryStore } from "@whiskeysockets/baileys/lib/Store";
 import pLimit from "p-limit";
 import P from "pino";
 import fs from "node:fs";
 import path from "node:path";
 import { Boom } from "@hapi/boom";
+
+/* =========================================================
+ * Types
+ * ======================================================= */
 
 type SenderType = "global_sender" | "user_sender";
 
@@ -93,13 +96,17 @@ export interface InitSessionOptions {
   onPairingCode?: (sessionId: string, pairingCode: string) => void | Promise<void>;
 }
 
+/* =========================================================
+ * Utils
+ * ======================================================= */
+
 const logger = P({ level: "info" });
-const store = makeInMemoryStore({ logger: P({ level: "silent" }) });
 
 const SESSION_ROOT = path.join(process.cwd(), "sessions");
 if (!fs.existsSync(SESSION_ROOT)) fs.mkdirSync(SESSION_ROOT, { recursive: true });
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 const randomBetween = (min: number, max: number) =>
   Math.floor(Math.random() * (max - min + 1)) + min;
 
@@ -130,6 +137,9 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label = "T
   }
 }
 
+/**
+ * Helper untuk parsing business verification secara defensif.
+ */
 function parseBusinessVerification(profile: unknown): {
   businessName: string | null;
   verifiedName: string | null;
@@ -177,6 +187,10 @@ function parseBusinessVerification(profile: unknown): {
     verificationLabel: rawLabel ? String(rawLabel) : null,
   };
 }
+
+/* =========================================================
+ * SessionManager
+ * ======================================================= */
 
 class SessionManager {
   private sessions = new Map<string, SessionRuntime>();
@@ -234,7 +248,6 @@ class SessionManager {
       defaultQueryTimeoutMs: 20_000,
     });
 
-    store.bind(sock.ev);
     sock.ev.on("creds.update", saveCreds);
 
     const runtime: SessionRuntime = {
@@ -282,7 +295,9 @@ class SessionManager {
     });
 
     this.sessions.set(config.sessionId, runtime);
-    if (!this.queues.has(config.sessionId)) this.queues.set(config.sessionId, { processing: false, tasks: [] });
+    if (!this.queues.has(config.sessionId)) {
+      this.queues.set(config.sessionId, { processing: false, tasks: [] });
+    }
 
     if (!sock.authState.creds.registered) {
       if (!options?.phoneNumber) {
@@ -292,10 +307,15 @@ class SessionManager {
           try {
             const cleanNumber = sanitizePhone(options.phoneNumber!);
             const code = await sock.requestPairingCode(cleanNumber);
+
             runtime.pairingCode = code;
             runtime.pairingPhone = cleanNumber;
+
             logger.info(`PAIRING CODE ${config.sessionId}: ${code}`);
-            if (options.onPairingCode) await options.onPairingCode(config.sessionId, code);
+
+            if (options.onPairingCode) {
+              await options.onPairingCode(config.sessionId, code);
+            }
           } catch (error) {
             logger.error(error, `[${config.sessionId}] gagal request pairing code`);
           }
@@ -309,10 +329,12 @@ class SessionManager {
   public async restartSession(sessionId: string, options?: InitSessionOptions): Promise<void> {
     const old = this.sessions.get(sessionId);
     if (!old) throw new Error(`Session ${sessionId} not found`);
+
     try {
       old.sock.end(new Error("Manual restart"));
     } catch {}
     this.sessions.delete(sessionId);
+
     await this.initSession(old.config, options);
   }
 
@@ -346,7 +368,9 @@ class SessionManager {
       });
 
       if (!queue.processing) {
-        this.processQueue(sessionId).catch((e) => logger.error(e, `[${sessionId}] queue worker crashed`));
+        this.processQueue(sessionId).catch((e) => {
+          logger.error(e, `[${sessionId}] queue worker crashed`);
+        });
       }
     });
   }
@@ -380,7 +404,15 @@ class SessionManager {
   }
 }
 
-async function checkSingleNumber(sock: WASocket, rawPhone: string, timeoutMs: number): Promise<NumberCheckDetail> {
+/* =========================================================
+ * Core Bulk Checker
+ * ======================================================= */
+
+async function checkSingleNumber(
+  sock: WASocket,
+  rawPhone: string,
+  timeoutMs: number
+): Promise<NumberCheckDetail> {
   const phone = sanitizePhone(rawPhone);
   const jid = toJid(phone);
 
@@ -403,10 +435,10 @@ async function checkSingleNumber(sock: WASocket, rawPhone: string, timeoutMs: nu
       };
     }
 
+    // ambil bio (defensif: bisa object/string tergantung versi)
     let bio: string | null = null;
     try {
       const statusResult = await withTimeout(sock.fetchStatus(jid), timeoutMs, "fetchStatus timeout");
-
       if (typeof statusResult === "string") {
         bio = statusResult;
       } else if (statusResult && typeof statusResult === "object") {
@@ -419,6 +451,7 @@ async function checkSingleNumber(sock: WASocket, rawPhone: string, timeoutMs: nu
       bio = null;
     }
 
+    // ambil business profile + deteksi verifikasi
     let type: "business" | "regular" | "unknown" = "regular";
     let businessName: string | null = null;
     let verifiedName: string | null = null;
@@ -443,6 +476,7 @@ async function checkSingleNumber(sock: WASocket, rawPhone: string, timeoutMs: nu
         verificationLabel = parsed.verificationLabel;
       }
     } catch {
+      // jika gagal baca business profile, tetap regular
       type = "regular";
     }
 
@@ -459,7 +493,7 @@ async function checkSingleNumber(sock: WASocket, rawPhone: string, timeoutMs: nu
       verificationLabel,
     };
   } catch (error: unknown) {
-    const errMsg = error instanceof Error ? error.message : "Unknown check error";
+    const message = error instanceof Error ? error.message : "Unknown check error";
     return {
       phone,
       jid,
@@ -471,7 +505,7 @@ async function checkSingleNumber(sock: WASocket, rawPhone: string, timeoutMs: nu
       isMetaVerified: false,
       isOfficialBusinessAccount: false,
       verificationLabel: null,
-      error: errMsg,
+      error: message,
     };
   }
 }
@@ -481,7 +515,9 @@ async function runBulkCheck(
   phoneNumbersArray: string[],
   opts?: CheckOptions
 ): Promise<CheckSummary> {
-  if (!runtime.isConnected) throw new Error(`Session ${runtime.config.sessionId} is not connected`);
+  if (!runtime.isConnected) {
+    throw new Error(`Session ${runtime.config.sessionId} is not connected`);
+  }
 
   const startedAt = new Date();
 
@@ -499,6 +535,7 @@ async function runBulkCheck(
 
   for (let i = 0; i < batches.length; i++) {
     const batch = batches[i];
+
     const batchResults = await Promise.all(
       batch.map((phone) =>
         limit(async () => {
@@ -511,12 +548,17 @@ async function runBulkCheck(
     details.push(...batchResults);
 
     if (i < batches.length - 1) {
-      await sleep(randomBetween(minBatchDelayMs, maxBatchDelayMs));
+      const dynamicDelay = randomBetween(minBatchDelayMs, maxBatchDelayMs);
+      await sleep(dynamicDelay);
     }
   }
 
   const registered = details.filter((d) => d.isRegistered);
   const unregistered = details.length - registered.length;
+  const businessCount = registered.filter((d) => d.type === "business").length;
+  const regularCount = registered.filter((d) => d.type === "regular").length;
+  const metaVerifiedCount = registered.filter((d) => d.isMetaVerified).length;
+  const obaCount = registered.filter((d) => d.isOfficialBusinessAccount).length;
 
   const finishedAt = new Date();
 
@@ -526,10 +568,10 @@ async function runBulkCheck(
     total_checked: details.length,
     registered_count: registered.length,
     unregistered_count: unregistered,
-    business_account_count: registered.filter((d) => d.type === "business").length,
-    regular_account_count: registered.filter((d) => d.type === "regular").length,
-    meta_verified_count: registered.filter((d) => d.isMetaVerified).length,
-    oba_count: registered.filter((d) => d.isOfficialBusinessAccount).length,
+    business_account_count: businessCount,
+    regular_account_count: regularCount,
+    meta_verified_count: metaVerifiedCount,
+    oba_count: obaCount,
     details,
     meta: {
       batch_size: batchSize,
@@ -542,6 +584,10 @@ async function runBulkCheck(
     },
   };
 }
+
+/* =========================================================
+ * Public API
+ * ======================================================= */
 
 export class WhatsAppBulkCheckerEngine {
   private sessionManager = new SessionManager();
@@ -566,7 +612,11 @@ export class WhatsAppBulkCheckerEngine {
     return this.sessionManager.getPairingInfo(sessionId);
   }
 
-  async checkNumbers(sessionId: string, phoneNumbersArray: string[], options?: CheckOptions): Promise<CheckSummary> {
+  async checkNumbers(
+    sessionId: string,
+    phoneNumbersArray: string[],
+    options?: CheckOptions
+  ): Promise<CheckSummary> {
     const session = this.sessionManager.getSession(sessionId);
     if (!session) throw new Error(`Session ${sessionId} not found`);
     return this.sessionManager.enqueueCheck(sessionId, phoneNumbersArray, options);
