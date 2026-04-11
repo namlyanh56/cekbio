@@ -109,6 +109,9 @@ function saveUser(user: PanoramaUser) {
 function upsertBot(userId: number, bot: PanoramaBot) {
   const user = getUser(userId);
   if (!user) throw new Error("User not found");
+  
+  if (!user.bots) user.bots = []; // Keamanan jika array bots undefined
+  
   const idx = user.bots.findIndex((b) => b.id === bot.id || b.phoneNumber === bot.phoneNumber);
   if (idx >= 0) user.bots[idx] = { ...user.bots[idx], ...bot };
   else user.bots.push(bot);
@@ -117,7 +120,7 @@ function upsertBot(userId: number, bot: PanoramaBot) {
 
 function removeBotFromUser(userId: number, botId: string) {
   const user = getUser(userId);
-  if (!user) return;
+  if (!user || !user.bots) return;
   user.bots = user.bots.filter((b) => b.id !== botId);
   saveUser(user);
 }
@@ -218,28 +221,29 @@ bot.start(async (ctx) => {
 });
 
 bot.action("back_main", async (ctx) => {
-  await ctx.editMessageText("Menu utama:", mainMenu);
+  await ctx.answerCbQuery().catch(() => {});
+  await ctx.editMessageText("Menu utama:", mainMenu).catch(() => {});
 });
 
 /* ===== Add Bot ===== */
 
 bot.action("menu_tambah_bot", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
   ctx.session.waitingForBotNumber = true;
   await ctx.editMessageText("Kirim nomor WhatsApp (contoh: 6281234567890)", {
     ...Markup.inlineKeyboard([[Markup.button.callback("🔙 Kembali", "back_main")]]),
-  });
+  }).catch(() => {});
 });
 
 bot.action(/^pair_try_(.+)$/, async (ctx) => {
   const match = ctx.match as RegExpExecArray;
   const sessionId = match[1];
   const user = getUser(ctx.from.id);
-  const b = user?.bots.find((x) => x.id === sessionId);
-  if (!b) return ctx.answerCbQuery("Bot tidak ditemukan");
+  const b = user?.bots?.find((x) => x.id === sessionId);
+  
+  if (!b) return ctx.answerCbQuery("Bot tidak ditemukan", { show_alert: true });
 
   try {
-    // Pastikan session menyala sebelum request pairing code.
-    // Jika bot restart, sessionnya di engine hilang, kita harus recreate
     const info = engine.getSessionPairingInfo(sessionId);
     if (!info) {
         return ctx.answerCbQuery("Sesi tidak aktif. Silakan hapus dan tambah ulang nomor bot.", { show_alert: true });
@@ -255,6 +259,7 @@ bot.action(/^pair_try_(.+)$/, async (ctx) => {
       lastError: null,
     });
 
+    await ctx.answerCbQuery("Meminta ulang kode...").catch(() => {});
     await ctx.editMessageText(`🔐 Kode pairing baru ${b.phoneNumber}:\n\`${code}\``, {
       parse_mode: "Markdown",
       ...Markup.inlineKeyboard([
@@ -262,10 +267,10 @@ bot.action(/^pair_try_(.+)$/, async (ctx) => {
         [Markup.button.callback("🛑 Cancel", `pair_cancel_${sessionId}`)],
         [Markup.button.callback("🔙 Kembali", "menu_daftar_bot")],
       ]),
-    });
+    }).catch(() => {});
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : "Retry gagal";
-    await ctx.answerCbQuery(msg, { show_alert: true });
+    await ctx.answerCbQuery(msg, { show_alert: true }).catch(() => {});
   }
 });
 
@@ -275,7 +280,7 @@ bot.action(/^pair_cancel_(.+)$/, async (ctx) => {
 
   await engine.cancelPairing(sessionId);
   const user = getUser(ctx.from.id);
-  const b = user?.bots.find((x) => x.id === sessionId);
+  const b = user?.bots?.find((x) => x.id === sessionId);
   if (b) {
     upsertBot(ctx.from.id, {
       ...b,
@@ -286,57 +291,66 @@ bot.action(/^pair_cancel_(.+)$/, async (ctx) => {
     });
   }
 
+  await ctx.answerCbQuery("Pairing dibatalkan.").catch(() => {});
   await ctx.editMessageText("✅ Pairing dibatalkan.", {
     ...Markup.inlineKeyboard([[Markup.button.callback("🔙 Kembali", "menu_daftar_bot")]]),
-  });
+  }).catch(() => {});
 });
 
 bot.action(/^start_bot_(.+)$/, async (ctx) => {
     const match = ctx.match as RegExpExecArray;
     const sessionId = match[1];
     const user = getUser(ctx.from.id);
-    const b = user?.bots.find((x) => x.id === sessionId);
-    if (!b) return ctx.answerCbQuery("Bot tidak ditemukan");
+    const b = user?.bots?.find((x) => x.id === sessionId);
+    if (!b) return ctx.answerCbQuery("Bot tidak ditemukan", { show_alert: true });
 
-    await ctx.answerCbQuery("Memulai ulang bot...");
+    await ctx.answerCbQuery("Memulai ulang bot...").catch(() => {});
     await startUserBotSession(ctx, ctx.from.id, b.phoneNumber, sessionId);
 });
 
-/* ===== Bot List ===== */
+/* ===== Bot List (DIPERBAIKI) ===== */
 
 bot.action("menu_daftar_bot", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
+  
   const user = getUser(ctx.from.id);
-  if (!user || user.bots.length === 0) {
+  if (!user || !user.bots || user.bots.length === 0) {
     await ctx.editMessageText("📭 Belum ada bot.", {
       ...Markup.inlineKeyboard([
         [Markup.button.callback("➕ Tambah Bot", "menu_tambah_bot")],
         [Markup.button.callback("🔙 Kembali", "back_main")],
       ]),
-    });
+    }).catch(() => {});
     return;
   }
 
   let text = "📱 *DAFTAR BOT*\n\n";
-  const buttons = [];
+  const keyboard: any[][] = []; // Gunakan Array 2D eksplisit agar layout aman
+  
   for (const b of user.bots) {
-    const online = b.isActive && engine.isSessionConnected(b.id);
-    text += `• ${b.phoneNumber} ${online ? "✅" : "❌"} (${b.pairingStatus ?? "idle"})\n`;
-    buttons.push(Markup.button.callback(b.phoneNumber, `detail_bot_${b.id}`));
+    const online = engine.isSessionConnected(b.id);
+    const statusEmoji = online ? "✅ Online" : "❌ Offline";
+    text += `• \`${b.phoneNumber}\` - ${statusEmoji} (${b.pairingStatus ?? "idle"})\n`;
+    
+    // Setiap tombol kita push sebagai baris baru [ array di dalam array ]
+    keyboard.push([Markup.button.callback(`⚙️ Kelola ${b.phoneNumber}`, `detail_bot_${b.id}`)]);
   }
-  buttons.push(Markup.button.callback("🔙 Kembali", "back_main"));
+  
+  keyboard.push([Markup.button.callback("🔙 Kembali", "back_main")]);
 
   await ctx.editMessageText(text, {
     parse_mode: "Markdown",
-    ...Markup.inlineKeyboard(buttons, { columns: 1 }),
-  });
+    ...Markup.inlineKeyboard(keyboard),
+  }).catch(() => {});
 });
 
 bot.action(/^detail_bot_(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
   const match = ctx.match as RegExpExecArray;
   const sessionId = match[1];
   const user = getUser(ctx.from.id);
-  const b = user?.bots.find((x) => x.id === sessionId);
-  if (!b) return ctx.answerCbQuery("Bot tidak ditemukan");
+  const b = user?.bots?.find((x) => x.id === sessionId);
+  if (!b) return ctx.answerCbQuery("Bot tidak ditemukan", { show_alert: true });
 
   const isRuntimeConnected = engine.isSessionConnected(b.id);
   const engineInfo = engine.getSessionPairingInfo(b.id);
@@ -350,7 +364,7 @@ bot.action(/^detail_bot_(.+)$/, async (ctx) => {
     `Runtime Connected: ${isRuntimeConnected ? "Ya" : "Tidak"}\n` +
     `Last Error: ${b.lastError ?? "-"}`;
 
-  const kbd = [];
+  const kbd: any[][] = [];
   if (!isRuntimeConnected) {
     kbd.push([Markup.button.callback("▶️ Start / Restart Bot", `start_bot_${sessionId}`)]);
   }
@@ -364,106 +378,117 @@ bot.action(/^detail_bot_(.+)$/, async (ctx) => {
   await ctx.editMessageText(detailText, {
     parse_mode: "Markdown",
     ...Markup.inlineKeyboard(kbd),
-  });
+  }).catch(() => {});
 });
 
 bot.action(/^delete_bot_(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery("Menghapus bot...").catch(() => {});
   const match = ctx.match as RegExpExecArray;
   const sessionId = match[1];
+  
   await engine.deleteSession(sessionId).catch(console.error);
   removeBotFromUser(ctx.from.id, sessionId);
 
   await ctx.editMessageText("✅ Bot dihapus.", {
     ...Markup.inlineKeyboard([[Markup.button.callback("🔙 Kembali", "menu_daftar_bot")]]),
-  });
+  }).catch(() => {});
 });
 
 /* ===== Check Mode ===== */
 
 bot.action("menu_cek_bio", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
   await ctx.editMessageText("Pilih mode:", {
     ...Markup.inlineKeyboard([
       [Markup.button.callback("👤 SENDER USER", "mode_user")],
       [Markup.button.callback("🌍 SENDER GLOBAL", "mode_global")],
       [Markup.button.callback("🔙 Kembali", "back_main")],
     ]),
-  });
+  }).catch(() => {});
 });
 
 bot.action("mode_user", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
   const user = getUser(ctx.from.id);
   if (!user) return;
-  const actives = user.bots.filter((b) => b.isActive && engine.isSessionConnected(b.id));
+  
+  const actives = (user.bots || []).filter((b) => b.isActive && engine.isSessionConnected(b.id));
 
   if (actives.length === 0) {
     await ctx.editMessageText("❌ Tidak ada bot aktif yang terhubung (Online).", {
       ...Markup.inlineKeyboard([[Markup.button.callback("🤖 Daftar Bot", "menu_daftar_bot")]]),
-    });
+    }).catch(() => {});
     return;
   }
 
   if (actives.length === 1) {
     const b = actives[0];
     ctx.session.pendingCheck = { mode: "user", botId: b.id, botPhone: b.phoneNumber };
-    await ctx.editMessageText("Kirim daftar nomor (maks 100).");
+    await ctx.editMessageText("Kirim daftar nomor (maks 100).").catch(() => {});
     return;
   }
 
-  const buttons = actives.map((b) => Markup.button.callback(b.phoneNumber, `select_bot_${b.id}`));
-  buttons.push(Markup.button.callback("🔙 Kembali", "back_main"));
-  await ctx.editMessageText("Pilih bot aktif:", Markup.inlineKeyboard(buttons, { columns: 1 }));
+  const keyboard: any[][] = [];
+  actives.forEach((b) => {
+    keyboard.push([Markup.button.callback(`Pilih ${b.phoneNumber}`, `select_bot_${b.id}`)]);
+  });
+  keyboard.push([Markup.button.callback("🔙 Kembali", "back_main")]);
+  
+  await ctx.editMessageText("Pilih bot aktif:", Markup.inlineKeyboard(keyboard)).catch(() => {});
 });
 
 bot.action(/^select_bot_(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
   const match = ctx.match as RegExpExecArray;
   const sessionId = match[1];
   const user = getUser(ctx.from.id);
-  const b = user?.bots.find((x) => x.id === sessionId);
+  const b = user?.bots?.find((x) => x.id === sessionId);
   if (!b) return;
   if (!(b.isActive && engine.isSessionConnected(b.id))) {
-    return ctx.answerCbQuery("Bot belum aktif / tidak terhubung");
+    return ctx.answerCbQuery("Bot belum aktif / tidak terhubung", { show_alert: true });
   }
 
   ctx.session.pendingCheck = { mode: "user", botId: b.id, botPhone: b.phoneNumber };
-  await ctx.editMessageText("Kirim daftar nomor (maks 100).");
+  await ctx.editMessageText("Kirim daftar nomor (maks 100).").catch(() => {});
 });
 
 bot.action("mode_global", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
   if (!globalSessionReady || !engine.isSessionConnected(GLOBAL_SESSION_ID)) {
-    await ctx.editMessageText("❌ Global sender offline.");
+    await ctx.editMessageText("❌ Global sender offline.").catch(() => {});
     return;
   }
   ctx.session.pendingCheck = { mode: "global", botId: GLOBAL_SESSION_ID };
-  await ctx.editMessageText("Kirim daftar nomor (maks 10).");
+  await ctx.editMessageText("Kirim daftar nomor (maks 10).").catch(() => {});
 });
 
 /* ===== History ===== */
 
 bot.action("menu_riwayat", async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
   const rows = getUserHistory(ctx.from.id, 10);
   if (!rows.length) {
     await ctx.editMessageText("📭 Belum ada riwayat.", {
       ...Markup.inlineKeyboard([[Markup.button.callback("🔙 Kembali", "back_main")]]),
-    });
+    }).catch(() => {});
     return;
   }
 
-  const buttons = rows.map((h, i) =>
-    Markup.button.callback(
-      `${i + 1}. ${new Date(h.timestamp).toLocaleString("id-ID")}`,
-      `history_${h.id}`
-    )
-  );
-  buttons.push(Markup.button.callback("🔙 Kembali", "back_main"));
+  const keyboard: any[][] = [];
+  rows.forEach((h, i) => {
+    keyboard.push([Markup.button.callback(`${i + 1}. ${new Date(h.timestamp).toLocaleString("id-ID")}`, `history_${h.id}`)]);
+  });
+  keyboard.push([Markup.button.callback("🔙 Kembali", "back_main")]);
 
-  await ctx.editMessageText("📜 Riwayat:", Markup.inlineKeyboard(buttons, { columns: 1 }));
+  await ctx.editMessageText("📜 Riwayat:", Markup.inlineKeyboard(keyboard)).catch(() => {});
 });
 
 bot.action(/^history_(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery().catch(() => {});
   const match = ctx.match as RegExpExecArray;
   const id = match[1];
   const item = getUserHistory(ctx.from.id, 100).find((x) => x.id === id);
-  if (!item) return ctx.answerCbQuery("Riwayat tidak ditemukan");
+  if (!item) return ctx.answerCbQuery("Riwayat tidak ditemukan", { show_alert: true });
 
   await ctx.editMessageText(`📋 Detail: ${item.id} | total ${item.totalNumbers}`, {
     ...Markup.inlineKeyboard([
@@ -471,10 +496,11 @@ bot.action(/^history_(.+)$/, async (ctx) => {
       [Markup.button.callback("📊 Download XLSX", `dl_xlsx_${id}`)],
       [Markup.button.callback("🔙 Kembali", "menu_riwayat")],
     ]),
-  });
+  }).catch(() => {});
 });
 
 bot.action(/^dl_txt_(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery("Mendownload TXT...").catch(() => {});
   const match = ctx.match as RegExpExecArray;
   const id = match[1];
   const item = getUserHistory(ctx.from.id, 100).find((x) => x.id === id);
@@ -484,10 +510,11 @@ bot.action(/^dl_txt_(.+)$/, async (ctx) => {
   await ctx.replyWithDocument({
     source: Buffer.from(content, "utf-8"),
     filename: `hasil_${item.id}.txt`,
-  });
+  }).catch(() => {});
 });
 
 bot.action(/^dl_xlsx_(.+)$/, async (ctx) => {
+  await ctx.answerCbQuery("Mendownload XLSX...").catch(() => {});
   const match = ctx.match as RegExpExecArray;
   const id = match[1];
   const item = getUserHistory(ctx.from.id, 100).find((x) => x.id === id);
@@ -497,7 +524,7 @@ bot.action(/^dl_xlsx_(.+)$/, async (ctx) => {
   await ctx.replyWithDocument({
     source: buffer,
     filename: `hasil_${id}.xlsx`,
-  });
+  }).catch(() => {});
 });
 
 /* ===== Admin global login ===== */
@@ -633,17 +660,15 @@ bot.on(message("text"), async (ctx) => {
     const user = getUser(userId);
     if (!user) return ctx.reply("❌ User tidak ditemukan.");
 
-    const existing = user.bots.find((b) => b.phoneNumber === phone);
+    const existing = user.bots?.find((b) => b.phoneNumber === phone);
 
     if (existing) {
         const isConnected = engine.isSessionConnected(existing.id);
 
-        // Case 1: Sudah ada dan terhubung dengan baik
         if (existing.isActive && isConnected) {
             return ctx.reply("❌ Nomor sudah terdaftar & aktif.");
         }
 
-        // Case 2: Sudah ada tapi disconnected (misal bot baru restart)
         if (existing.isActive && !isConnected) {
              return ctx.reply(
                 `⚠️ Nomor sudah terdaftar tapi sedang offline.\nSilakan jalankan ulang bot.`,
@@ -653,7 +678,6 @@ bot.on(message("text"), async (ctx) => {
              );
         }
 
-        // Case 3: Statusnya masih pending/failed, berikan Try Again / Cancel
         return ctx.reply(
             `⚠️ Nomor sudah ada tapi belum terhubung (Status: ${existing.pairingStatus ?? "unknown"}).`,
             Markup.inlineKeyboard([
@@ -663,7 +687,6 @@ bot.on(message("text"), async (ctx) => {
         );
     }
 
-    // Nomor baru
     const sessionId = `user_${userId}_${phone}`;
     upsertBot(userId, {
       id: sessionId,
@@ -708,7 +731,7 @@ bot.on(message("text"), async (ctx) => {
         progress.message_id,
         undefined,
         "✅ Selesai."
-      );
+      ).catch(() => {});
 
       const registered = result.details
         .filter((d) => d.isRegistered)
