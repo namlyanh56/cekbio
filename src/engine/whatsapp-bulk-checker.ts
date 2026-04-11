@@ -17,13 +17,14 @@ import { Boom } from "@hapi/boom";
 
 type SenderType = "global_sender" | "user_sender";
 
-export type PairingState =
+export type PairingStatus =
   | "idle"
   | "pending_pairing"
-  | "pairing_code_sent"
+  | "code_sent"
   | "connected"
   | "failed"
-  | "logged_out";
+  | "logged_out"
+  | "cancelled";
 
 export interface SessionConfig {
   sessionId: string;
@@ -39,12 +40,10 @@ interface SessionRuntime {
   lastSeenAt: number;
   pairingCode?: string | null;
   pairingPhone?: string | null;
-
-  pairingState: PairingState;
+  pairingStatus: PairingStatus;
   pairingAttempts: number;
   lastDisconnectCode?: number | null;
   lastError?: string | null;
-  lastPairingCodeAt?: number | null;
 }
 
 export interface NumberCheckDetail {
@@ -153,6 +152,9 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label = "T
   }
 }
 
+/**
+ * Helper defensif untuk parsing profile bisnis
+ */
 function parseBusinessVerification(profile: unknown): {
   businessName: string | null;
   verifiedName: string | null;
@@ -184,7 +186,9 @@ function parseBusinessVerification(profile: unknown): {
   const labelText = rawLabel ? String(rawLabel).toLowerCase() : "";
 
   const isMetaVerified =
-    Boolean(verifiedName) || labelText.includes("meta verified") || labelText.includes("verified");
+    Boolean(verifiedName) ||
+    labelText.includes("meta verified") ||
+    labelText.includes("verified");
 
   const isOfficialBusinessAccount =
     labelText.includes("official business account") ||
@@ -238,48 +242,35 @@ class SessionManager {
       sessionId,
       pairingPhone: s.pairingPhone ?? null,
       pairingCode: s.pairingCode ?? null,
-      pairingState: s.pairingState,
+      pairingStatus: s.pairingStatus,
       pairingAttempts: s.pairingAttempts,
       isConnected: s.isConnected,
       isRegistered: s.sock.authState.creds.registered,
       lastDisconnectCode: s.lastDisconnectCode ?? null,
       lastError: s.lastError ?? null,
-      lastPairingCodeAt: s.lastPairingCodeAt ?? null,
     };
-  }
-
-  private async emitFailed(options: InitSessionOptions | undefined, sessionId: string, reason: string) {
-    if (options?.onFailed) await options.onFailed(sessionId, reason);
   }
 
   private async requestPairingCode(
     runtime: SessionRuntime,
     options?: InitSessionOptions
-  ): Promise<string | null> {
-    if (!runtime.pairingPhone) throw new Error("Pairing phone is not set");
+  ): Promise<string> {
+    if (!runtime.pairingPhone) throw new Error("pairing phone is missing");
 
-    runtime.pairingState = "pending_pairing";
+    runtime.pairingStatus = "pending_pairing";
     runtime.pairingAttempts += 1;
 
-    try {
-      const code = await runtime.sock.requestPairingCode(runtime.pairingPhone);
-      runtime.pairingCode = code;
-      runtime.lastPairingCodeAt = Date.now();
-      runtime.pairingState = "pairing_code_sent";
-      logger.info(`PAIRING CODE ${runtime.config.sessionId}: ${code}`);
+    const code = await runtime.sock.requestPairingCode(runtime.pairingPhone);
+    runtime.pairingCode = code;
+    runtime.pairingStatus = "code_sent";
+    runtime.lastError = null;
+    logger.info(`PAIRING CODE ${runtime.config.sessionId}: ${code}`);
 
-      if (options?.onPairingCode) {
-        await options.onPairingCode(runtime.config.sessionId, code);
-      }
-
-      return code;
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : "failed request pairing code";
-      runtime.lastError = msg;
-      runtime.pairingState = "failed";
-      await this.emitFailed(options, runtime.config.sessionId, msg);
-      return null;
+    if (options?.onPairingCode) {
+      await options.onPairingCode(runtime.config.sessionId, code);
     }
+
+    return code;
   }
 
   public async initSession(config: SessionConfig, options?: InitSessionOptions): Promise<SessionRuntime> {
@@ -314,11 +305,10 @@ class SessionManager {
       lastSeenAt: Date.now(),
       pairingCode: null,
       pairingPhone: options?.phoneNumber ? sanitizePhone(options.phoneNumber) : null,
-      pairingState: "idle",
+      pairingStatus: "idle",
       pairingAttempts: 0,
       lastDisconnectCode: null,
       lastError: null,
-      lastPairingCodeAt: null,
     };
 
     sock.ev.on("connection.update", async (update) => {
@@ -327,8 +317,8 @@ class SessionManager {
 
       if (connection === "open") {
         runtime.isConnected = true;
-        runtime.pairingState = "connected";
         runtime.pairingCode = null;
+        runtime.pairingStatus = "connected";
         runtime.lastError = null;
         logger.info(`[${config.sessionId}] connected`);
 
@@ -346,18 +336,19 @@ class SessionManager {
         logger.warn(`[${config.sessionId}] disconnected. code=${statusCode}, loggedOut=${isLoggedOut}`);
 
         if (isLoggedOut) {
-          runtime.pairingState = "logged_out";
-          runtime.lastError = "Logged out / invalid auth";
-          await this.emitFailed(options, config.sessionId, runtime.lastError);
-          await this.deleteSession(config.sessionId); // bersihkan auth invalid
+          runtime.pairingStatus = "logged_out";
+          runtime.lastError = "Logged out / auth invalid";
+
+          if (options?.onFailed) await options.onFailed(config.sessionId, runtime.lastError);
+
+          await this.deleteSession(config.sessionId);
           return;
         }
 
-        // jangan spam retry otomatis pairing code.
-        // beri status failed agar user retry manual.
-        runtime.pairingState = "failed";
-        runtime.lastError = `Disconnected with code ${statusCode ?? "unknown"}`;
-        await this.emitFailed(options, config.sessionId, runtime.lastError);
+        // Tidak auto restart agresif lagi supaya tidak race dengan user input code
+        runtime.pairingStatus = "failed";
+        runtime.lastError = `Disconnected code=${statusCode ?? "unknown"}`;
+        if (options?.onFailed) await options.onFailed(config.sessionId, runtime.lastError);
       }
     });
 
@@ -366,28 +357,46 @@ class SessionManager {
       this.queues.set(config.sessionId, { processing: false, tasks: [] });
     }
 
-    // Hanya generate pairing code jika belum registered
-    if (!sock.authState.creds.registered && runtime.pairingPhone) {
-      await sleep(2500);
-      await this.requestPairingCode(runtime, options);
+    if (!sock.authState.creds.registered) {
+      if (!runtime.pairingPhone) {
+        logger.warn(`[${config.sessionId}] phoneNumber tidak diberikan`);
+      } else {
+        await sleep(2500);
+        try {
+          await this.requestPairingCode(runtime, options);
+        } catch (e: unknown) {
+          runtime.pairingStatus = "failed";
+          runtime.lastError = e instanceof Error ? e.message : "Failed request pairing code";
+          if (options?.onFailed) await options.onFailed(config.sessionId, runtime.lastError);
+        }
+      }
     }
 
     return runtime;
   }
 
-  /**
-   * Retry pairing MANUAL: generate kode baru untuk session yang sudah ada.
-   */
   public async retryPairingCode(sessionId: string, phoneNumber?: string): Promise<string> {
     const runtime = this.sessions.get(sessionId);
     if (!runtime) throw new Error(`Session ${sessionId} not found`);
 
     if (phoneNumber) runtime.pairingPhone = sanitizePhone(phoneNumber);
-    if (!runtime.pairingPhone) throw new Error("Phone number required for pairing retry");
+    if (!runtime.pairingPhone) throw new Error("phoneNumber required");
 
-    const code = await this.requestPairingCode(runtime);
-    if (!code) throw new Error("Failed to request new pairing code");
-    return code;
+    return this.requestPairingCode(runtime);
+  }
+
+  public async cancelPairing(sessionId: string): Promise<void> {
+    const runtime = this.sessions.get(sessionId);
+    if (!runtime) return;
+
+    runtime.pairingStatus = "cancelled";
+    runtime.pairingCode = null;
+
+    try {
+      runtime.sock.end(new Error("Pairing cancelled by user"));
+    } catch {}
+
+    await this.deleteSession(sessionId);
   }
 
   public async restartSession(sessionId: string, options?: InitSessionOptions): Promise<void> {
@@ -505,10 +514,13 @@ async function checkSingleNumber(
     let bio: string | null = null;
     try {
       const statusResult = await withTimeout(sock.fetchStatus(jid), timeoutMs, "fetchStatus timeout");
-      if (typeof statusResult === "string") bio = statusResult;
-      else if (statusResult && typeof statusResult === "object") {
-        const maybeStatus = statusResult as { status?: unknown };
-        bio = typeof maybeStatus.status === "string" ? maybeStatus.status : null;
+      if (typeof statusResult === "string") {
+        bio = statusResult;
+      } else if (statusResult && typeof statusResult === "object") {
+        const maybeObj = statusResult as { status?: unknown };
+        bio = typeof maybeObj.status === "string" ? maybeObj.status : null;
+      } else {
+        bio = null;
       }
     } catch {
       bio = null;
@@ -654,6 +666,10 @@ export class WhatsAppBulkCheckerEngine {
 
   async retryPairingCode(sessionId: string, phoneNumber?: string) {
     return this.sessionManager.retryPairingCode(sessionId, phoneNumber);
+  }
+
+  async cancelPairing(sessionId: string) {
+    return this.sessionManager.cancelPairing(sessionId);
   }
 
   async restartSession(sessionId: string, options?: InitSessionOptions) {
