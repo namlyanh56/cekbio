@@ -324,7 +324,6 @@ bot.start(async (ctx) => {
     user = { userId, username: ctx.from.username, firstName: ctx.from.first_name, tier: "free", createdAt: new Date().toISOString(), bots: [], lastMode: null };
     saveUser(user);
   }
-  // Menggunakan message_effect_id API Telegram: "5104841245755180586" (Api/Fire)
   await ctx.reply(generateMainMenuHTML(user), { parse_mode: "HTML", message_effect_id: "5104841245755180586", ...replyKeyboard } as any);
 });
 
@@ -398,44 +397,72 @@ bot.action("menu_tambah_bot", async (ctx) => {
 
 /* ===================== ADD BOT & PAIRING ===================== */
 
-async function startUserBotSession(ctx: Context, userId: number, phone: string, sessionId: string) {
+// Fungsi ini diubah agar mendukung 'silent run' saat bot restart (ctx = null)
+async function startUserBotSession(ctx: Context | null, userId: number, phone: string, sessionId: string) {
     const config: SessionConfig = { sessionId, senderType: "user_sender", label: `User ${userId}` };
     const options: InitSessionOptions = {
       phoneNumber: phone,
       onPairingCode: async (_sid, code) => {
         upsertBot(userId, { id: sessionId, phoneNumber: phone, isActive: false, addedAt: new Date().toISOString(), pairingStatus: "code_sent", lastPairingCode: code, lastPairingAt: new Date().toISOString(), lastError: null });
-        const text = `🔐 <b>KODE PAIRING</b>\n───────────────\n👤 <b>Sender:</b> <code>${phone}</code>\n\nKode pairing: <code>${code}</code>`;
-        const kbd = Markup.inlineKeyboard([[Markup.button.callback("🔁 Try Again", `pair_try_${sessionId}`), Markup.button.callback("🛑 Cancel", `pair_cancel_${sessionId}`)]]);
+        
+        if (ctx) {
+            const text = `🔐 <b>KODE PAIRING</b>\n───────────────\n👤 <b>Sender:</b> <code>${phone}</code>\n\nKode pairing: <code>${code}</code>`;
+            const kbd = Markup.inlineKeyboard([[Markup.button.callback("🔁 Try Again", `pair_try_${sessionId}`), Markup.button.callback("🛑 Cancel", `pair_cancel_${sessionId}`)]]);
 
-        if (pairingMessageTracker[sessionId]) {
-            await ctx.telegram.editMessageText(ctx.chat!.id, pairingMessageTracker[sessionId], undefined, text, { parse_mode: "HTML", ...kbd }).catch(()=>{});
-        } else {
-            const msg = await ctx.reply(text, { parse_mode: "HTML", ...kbd });
-            pairingMessageTracker[sessionId] = msg.message_id;
+            if (pairingMessageTracker[sessionId]) {
+                await ctx.telegram.editMessageText(ctx.chat!.id, pairingMessageTracker[sessionId], undefined, text, { parse_mode: "HTML", ...kbd }).catch(()=>{});
+            } else {
+                const msg = await ctx.reply(text, { parse_mode: "HTML", ...kbd });
+                pairingMessageTracker[sessionId] = msg.message_id;
+            }
         }
       },
       onConnected: async () => {
         upsertBot(userId, { id: sessionId, phoneNumber: phone, isActive: true, addedAt: new Date().toISOString(), pairingStatus: "connected", lastError: null });
-        const text = `✅ <b>KONEKSI BERHASIL</b>\n───────────────\n👤 <b>Sender:</b> <code>${phone}</code>\n\n✅ Berhasil terhubung dan siap digunakan!`;
-        if (pairingMessageTracker[sessionId]) {
-            await ctx.telegram.editMessageText(ctx.chat!.id, pairingMessageTracker[sessionId], undefined, text, { parse_mode: "HTML" }).catch(()=>{});
-            delete pairingMessageTracker[sessionId]; 
-        } else {
-            await ctx.reply(text, { parse_mode: "HTML" });
+        console.log(`[STARTUP] Bot ${phone} berhasil terhubung.`);
+        
+        if (ctx) {
+            const text = `✅ <b>KONEKSI BERHASIL</b>\n───────────────\n👤 <b>Sender:</b> <code>${phone}</code>\n\n✅ Berhasil terhubung dan siap digunakan!`;
+            if (pairingMessageTracker[sessionId]) {
+                await ctx.telegram.editMessageText(ctx.chat!.id, pairingMessageTracker[sessionId], undefined, text, { parse_mode: "HTML" }).catch(()=>{});
+                delete pairingMessageTracker[sessionId]; 
+            } else {
+                await ctx.reply(text, { parse_mode: "HTML" });
+            }
         }
       },
       onFailed: async (_sid, reason) => {
         upsertBot(userId, { id: sessionId, phoneNumber: phone, isActive: false, addedAt: new Date().toISOString(), pairingStatus: "failed", lastError: reason });
-        const text = `❌ <b>KONEKSI GAGAL</b>\n───────────────\n👤 <b>Sender:</b> <code>${phone}</code>\n\n⚠️ Error/Terputus: ${escapeHTML(reason)}`;
-        const kbd = Markup.inlineKeyboard([[Markup.button.callback("🔁 Try Again", `pair_try_${sessionId}`), Markup.button.callback("🛑 Cancel", `pair_cancel_${sessionId}`)]]);
-        if (pairingMessageTracker[sessionId]) {
-            await ctx.telegram.editMessageText(ctx.chat!.id, pairingMessageTracker[sessionId], undefined, text, { parse_mode: "HTML", ...kbd }).catch(()=>{});
-        } else {
-            await ctx.reply(text, { parse_mode: "HTML", ...kbd });
+        
+        if (ctx) {
+            const text = `❌ <b>KONEKSI GAGAL</b>\n───────────────\n👤 <b>Sender:</b> <code>${phone}</code>\n\n⚠️ Error/Terputus: ${escapeHTML(reason)}`;
+            const kbd = Markup.inlineKeyboard([[Markup.button.callback("🔁 Try Again", `pair_try_${sessionId}`), Markup.button.callback("🛑 Cancel", `pair_cancel_${sessionId}`)]]);
+            if (pairingMessageTracker[sessionId]) {
+                await ctx.telegram.editMessageText(ctx.chat!.id, pairingMessageTracker[sessionId], undefined, text, { parse_mode: "HTML", ...kbd }).catch(()=>{});
+            } else {
+                await ctx.reply(text, { parse_mode: "HTML", ...kbd });
+            }
         }
       },
     };
     await engine.createSession(config, options);
+}
+
+// Fungsi otomatisasi reconnect bot user saat server/PM2 direstart
+async function initAllUserSessions() {
+    console.log("🔄 [STARTUP] Menghubungkan ulang bot-bot yang aktif di database...");
+    const users = loadUsers();
+    for (const user of users.values()) {
+        if (!user.bots) continue;
+        for (const b of user.bots) {
+            if (b.pairingStatus === "connected" || b.isActive) {
+                console.log(`[STARTUP] Reconnecting ${b.phoneNumber}...`);
+                await startUserBotSession(null, user.userId, b.phoneNumber, b.id);
+                // Jeda 1 detik agar tidak membombardir server WhatsApp
+                await new Promise(r => setTimeout(r, 1000));
+            }
+        }
+    }
 }
 
 bot.action(/^pair_try_(.+)$/, async (ctx) => {
@@ -567,7 +594,7 @@ bot.action(/^vcat_(.+?)_(.+)$/, async (ctx) => {
   const { filtered, title } = filterCategory(item.fullResult, cat);
 
   let text = `✅ <b>DAFTAR LENGKAP ${title} (${filtered.length})</b>\n───────────────\n`;
-  text += `Halaman : 1/1\n───────────────\n`;
+  text += `Halaman : 1/1\n───────────���───\n`;
   
   if (filtered.length === 0) {
       text += "<i>Tidak ada data.</i>\n───────────────\n";
@@ -657,10 +684,9 @@ bot.on(message("text"), async (ctx) => {
     const numbers = parseNumbersFromText(text);
     if (!numbers.length) return ctx.reply("❌ Tidak ada nomor valid.");
 
-    const max = 500; // Batas dinaikkan ke 500
+    const max = 500; 
     if (numbers.length > max) return ctx.reply(`❌ Maks ${max} nomor dalam sekali cek.`);
 
-    // 1. Pesan Proses (Akan diubah setelah selesai)
     const progress = await ctx.reply("⏳ <b>PROSES CEK BIO SEDANG BERJALAN!</b>\n───────────────\nMohon tunggu, sistem sedang memeriksa daftar nomor...", {parse_mode:"HTML"});
     
     try {
@@ -672,10 +698,8 @@ bot.on(message("text"), async (ctx) => {
       const item: CheckHistoryItem = { id: reportId, userId, mode: pending.mode, botPhone: pending.botPhone, timestamp: new Date().toISOString(), totalNumbers: result.total_checked, durationMs, fullResult: result };
       addHistoryItem(item);
 
-      // 2. Edit Pesan Proses Menjadi Selesai
       await ctx.telegram.editMessageText(ctx.chat!.id, progress.message_id, undefined, `✅ <b>PROSES CEK BIO SELESAI!</b>\n───────────────\nLaporan hasil cek bio telah berhasil disusun dan dikirim di bawah ini:`, {parse_mode:"HTML"}).catch(()=>{});
 
-      // 3. Kirim File + Efek Party 🎉 (ID: 5046509860389126442)
       const txtBuffer = generateTxtReport(result, reportId);
       await ctx.replyWithDocument(
         { source: txtBuffer, filename: `CekBio_LR${Date.now().toString().slice(-8)}_${result.total_checked}Nomor.txt` },
@@ -696,6 +720,7 @@ bot.on(message("text"), async (ctx) => {
 /* ===================== START ===================== */
 
 async function main() {
+  await initAllUserSessions(); // Menghubungkan ulang bot yg tersimpan
   await bot.launch();
   console.log("🤖 Panorama Bot running...");
   process.once("SIGINT", () => bot.stop("SIGINT"));
