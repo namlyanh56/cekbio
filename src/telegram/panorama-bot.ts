@@ -195,21 +195,23 @@ function generateMainMenuHTML(user: PanoramaUser): string {
   return `👋 <b>WELCOME TO 📁 PANORAMA CEK BIO BOT</b>
 
 👥 <b>PROFIL USER</b>
-L 👤 Nama: <b>${escapeHTML(user.firstName || "User")}</b>
+<blockquote>L 👤 Nama: <b>${escapeHTML(user.firstName || "User")}</b> ”
 L 🆔 Userid: <code>${user.userId}</code>
 L 🧾 Username: ${user.username ? "@" + user.username : "-"}
-L 🏷 Status : <b>${user.tier === "vip" ? "VIP TIER" : "FREE TIER"}</b>
+L 🏷 Status : <b>${user.tier === "vip" ? "VIP TIER" : "FREE TIER"}</b></blockquote>
 
 📊 <b>STATISTIK USER</b>
-L 🤖 Total bot : <b>${usBots}</b>
+<blockquote>L 🤖 Total bot : <b>${usBots}</b> ”
 L 🔍 Total cek bio : <b>${usCek}x</b>
-L 📱 Total nomor dicek : <b>${usNomor}</b>
+L 📱 Total nomor dicek : <b>${usNomor}</b></blockquote>
 
 🌍 <b>STATISTIK GLOBAL</b>
-L 👥 Total user : <b>${gsUsers}</b>
+<blockquote>L 👥 Total user : <b>${gsUsers}</b> ”
 L 🤖 Total bot : <b>${globalBots}</b>
 L 🔍 Total cek bio : <b>${gsCek}x</b>
-L 📱 Total nomor dicek : <b>${gsNomor}</b>`;
+L 📱 Total nomor dicek : <b>${gsNomor}</b></blockquote>
+
+⬇️ <i>Klik fitur di bawah ini:</i>`;
 }
 
 function generateTxtReport(summary: CheckSummary, reportId: string): Buffer {
@@ -252,24 +254,27 @@ function getSummaryCaption(item: CheckHistoryItem): string {
   return `📊 <b>RINGKASAN HASIL CEK BIO</b> 📊
 ───────────────
 ℹ️ <b>INFO LAPORAN CEK BIO:</b>
-L 🤖 Sender: ${item.mode === "user" ? "User (Pribadi)" : "Global"}
+<blockquote>L 🤖 Sender: ${item.mode === "user" ? "User (Pribadi)" : "Global"} ”
 L 👤 Nama: <b>${escapeHTML(getUser(item.userId)?.firstName || "User")}</b>
 L 🆔 Laporan: <code>${item.id}</code>
+L 🤖 Bot Aktif: 1/1
 L 🕒 Waktu: ${dateStr}
-L ⏱ Durasi: ${durasiSec} detik
+L ⚡ Speed: Standar
+L ⏱ Durasi: ${durasiSec} detik</blockquote>
 
 📊 <b>STATISTIK NOMOR CEK BIO:</b>
-L 🔢 Total Cek: <b>${summary.total_checked} nomor</b>
-L 📝 Ada Bio: <b>${adaBio}</b>
-L 🚫 Tanpa Bio: <b>${tanpaBio}</b>
-L ✅ Terdaftar WA: <b>${summary.registered_count}</b>
-L ❌ Tdk Terdaftar: <b>${summary.unregistered_count}</b>
+<blockquote>L 🔢 Total Nomor Cek Bio: <b>${summary.total_checked} nomor</b> ”</blockquote>
+
+<blockquote>L 📝 Nomor WhatsApp Ada Bio: <b>${adaBio}</b> ”
+L 🚫 Nomor WhatsApp Tanpa Bio: <b>${tanpaBio}</b>
+L ✅ Nomor Terdaftar WhatsApp : <b>${summary.registered_count}</b>
+L ❌ Nomor Tidak Terdaftar WA: <b>${summary.unregistered_count}</b></blockquote>
 
 📱 <b>DETAIL AKUN WA CEK BIO:</b>
-L 💬 Messenger: <b>${summary.regular_account_count}</b>
-L 🏢 Business: <b>${summary.business_account_count}</b>
-L 🔷 Meta Verified: <b>${summary.meta_verified_count}</b>
-L ⭐ OBA: <b>${summary.oba_count}</b>
+<blockquote>L 💬 Jenis Akun Messenger: <b>${summary.regular_account_count}</b> ”
+L 🏢 Jenis Akun Business: <b>${summary.business_account_count}</b>
+L 🔷 Status Akun Meta Verified: <b>${summary.meta_verified_count}</b>
+L ⭐ Status Akun OBA: <b>${summary.oba_count}</b></blockquote>
 
 👇 <i>Gunakan tombol di bawah untuk melihat daftar lengkap dan detail.</i>`;
 }
@@ -319,7 +324,8 @@ bot.start(async (ctx) => {
     user = { userId, username: ctx.from.username, firstName: ctx.from.first_name, tier: "free", createdAt: new Date().toISOString(), bots: [], lastMode: null };
     saveUser(user);
   }
-  await ctx.reply(generateMainMenuHTML(user), { parse_mode: "HTML", ...replyKeyboard });
+  // Menggunakan message_effect_id API Telegram: "5104841245755180586" (Api/Fire)
+  await ctx.reply(generateMainMenuHTML(user), { parse_mode: "HTML", message_effect_id: "5104841245755180586", ...replyKeyboard } as any);
 });
 
 bot.action("back_main", async (ctx) => {
@@ -332,7 +338,7 @@ bot.action("back_main", async (ctx) => {
 /* ===================== REPLY KEYBOARD HANDLERS (4 MAIN MENUS) ===================== */
 
 bot.hears("📱 Cek Bio", async (ctx) => {
-  ctx.session.waitingForBotNumber = false; // Reset state lain
+  ctx.session.waitingForBotNumber = false; 
   await ctx.reply("📱 <b>PILIH SENDER CEK BIO</b>\n───────────────\nPilih jalur pengiriman:", {
     parse_mode: "HTML",
     ...Markup.inlineKeyboard([
@@ -379,16 +385,15 @@ bot.hears("📜 Riwayat", async (ctx) => {
 bot.hears("➕ Tambah Bot", async (ctx) => {
   ctx.session.waitingForBotNumber = true;
   ctx.session.pendingCheck = undefined;
-  const text = `➕ <b>TAMBAH BOT USER</b>\n───────────────\nKirim nomor WhatsApp yang akan dijadikan sender. Pastikan nomor aktif.\n\n<b>Contoh Format:</b>\n6281234567890\n+6281234567890\n\n<i>Kirim nomor sekarang:</i>`;
+  const text = `➕ <b>TAMBAH BOT USER</b>\n───────────────\n<blockquote>Kirim nomor WhatsApp yang akan dijadikan sender. ”\nPastikan nomor aktif.\n\n<b>Contoh Format:</b>\n6281234567890\n+6281234567890\n+748394834\n2348948394</blockquote>\n<i>Kirim nomor sekarang:</i>`;
   await ctx.reply(text, { parse_mode: "HTML" });
 });
 
-// Fallback untuk inline "Tambah Bot"
 bot.action("menu_tambah_bot", async (ctx) => {
   await ctx.answerCbQuery().catch(() => {});
   ctx.session.waitingForBotNumber = true;
   ctx.session.pendingCheck = undefined;
-  await ctx.editMessageText(`➕ <b>TAMBAH BOT USER</b>\n───────────────\nKirim nomor WhatsApp yang akan dijadikan sender. Pastikan nomor aktif.\n\n<b>Contoh Format:</b>\n6281234567890\n\n<i>Kirim nomor sekarang:</i>`, { parse_mode: "HTML" }).catch(() => {});
+  await ctx.editMessageText(`➕ <b>TAMBAH BOT USER</b>\n───────────────\n<blockquote>Kirim nomor WhatsApp yang akan dijadikan sender. ”\nPastikan nomor aktif.\n\n<b>Contoh Format:</b>\n6281234567890\n+6281234567890\n+748394834\n2348948394</blockquote>\n<i>Kirim nomor sekarang:</i>`, { parse_mode: "HTML" }).catch(() => {});
 });
 
 /* ===================== ADD BOT & PAIRING ===================== */
@@ -508,7 +513,7 @@ bot.action("mode_user", async (ctx) => {
   }
   if (actives.length === 1) {
     ctx.session.pendingCheck = { mode: "user", botId: actives[0].id, botPhone: actives[0].phoneNumber };
-    await ctx.editMessageText("📄 <b>KIRIM DAFTAR NOMOR</b>\n───────────────\nKirim nomor yang ingin dicek (pisahkan dengan spasi/enter, maks 100).", {parse_mode: "HTML"}).catch(() => {});
+    await ctx.editMessageText("📄 <b>KIRIM DAFTAR NOMOR</b>\n───────────────\nKirim nomor yang ingin dicek (pisahkan dengan spasi/enter, maks 500).", {parse_mode: "HTML"}).catch(() => {});
     return;
   }
 
@@ -524,7 +529,7 @@ bot.action(/^select_bot_(.+)$/, async (ctx) => {
   if (!b || !(b.isActive && engine.isSessionConnected(b.id))) return ctx.answerCbQuery("Bot offline", { show_alert: true });
 
   ctx.session.pendingCheck = { mode: "user", botId: b.id, botPhone: b.phoneNumber };
-  await ctx.editMessageText("📄 <b>KIRIM DAFTAR NOMOR</b>\n───────────────\nKirim nomor yang ingin dicek (pisahkan dengan spasi/enter, maks 100).", {parse_mode: "HTML"}).catch(() => {});
+  await ctx.editMessageText("📄 <b>KIRIM DAFTAR NOMOR</b>\n───────────────\nKirim nomor yang ingin dicek (pisahkan dengan spasi/enter, maks 500).", {parse_mode: "HTML"}).catch(() => {});
 });
 
 bot.action("mode_global", async (ctx) => {
@@ -534,7 +539,7 @@ bot.action("mode_global", async (ctx) => {
     return;
   }
   ctx.session.pendingCheck = { mode: "global", botId: GLOBAL_SESSION_ID };
-  await ctx.editMessageText("📄 <b>KIRIM DAFTAR NOMOR</b>\n───────────────\nKirim nomor yang ingin dicek (maks 10).", {parse_mode:"HTML"}).catch(() => {});
+  await ctx.editMessageText("📄 <b>KIRIM DAFTAR NOMOR</b>\n───────────────\nKirim nomor yang ingin dicek (maks 500).", {parse_mode:"HTML"}).catch(() => {});
 });
 
 bot.action(/^history_(.+)$/, async (ctx) => {
@@ -543,15 +548,10 @@ bot.action(/^history_(.+)$/, async (ctx) => {
   const item = getUserHistory(ctx.from.id, 100).find((x) => x.id === id);
   if (!item || !item.fullResult) return ctx.answerCbQuery("Riwayat tidak lengkap", { show_alert: true });
   
-  // Send document block exactly like new checks
   const txtBuffer = generateTxtReport(item.fullResult, item.id);
   await ctx.replyWithDocument(
     { source: txtBuffer, filename: `CekBio_LR${item.id}_${item.totalNumbers}Nomor.txt` },
-    {
-      caption: getSummaryCaption(item),
-      parse_mode: "HTML",
-      ...getSummaryKeyboard(item)
-    }
+    { caption: getSummaryCaption(item), parse_mode: "HTML", ...getSummaryKeyboard(item) }
   );
 });
 
@@ -572,15 +572,11 @@ bot.action(/^vcat_(.+?)_(.+)$/, async (ctx) => {
   if (filtered.length === 0) {
       text += "<i>Tidak ada data.</i>\n───────────────\n";
   } else {
-      // Limit to max 30 numbers to avoid exceeding Telegram's 1024 character caption limit
       const show = filtered.slice(0, 30);
-      show.forEach((x, i) => {
-          text += `${i + 1}. ${x.phone}\n`;
-      });
+      show.forEach((x, i) => { text += `${i + 1}. ${x.phone}\n`; });
       if (filtered.length > 30) text += `<i>...dan ${filtered.length - 30} lainnya.</i>\n`;
       text += `───────────────\n`;
   }
-  
   text += `👇 <i>Pilih format untuk menampilkan data ini.</i>`;
 
   await ctx.editMessageCaption(text, {
@@ -597,11 +593,7 @@ bot.action(/^vsum_(.+)$/, async (ctx) => {
   const reportId = (ctx.match as RegExpExecArray)[1];
   const item = getUserHistory(ctx.from.id, 100).find(x => x.id === reportId);
   if (!item) return;
-  
-  await ctx.editMessageCaption(getSummaryCaption(item), {
-      parse_mode: "HTML",
-      ...getSummaryKeyboard(item)
-  }).catch(()=>{});
+  await ctx.editMessageCaption(getSummaryCaption(item), { parse_mode: "HTML", ...getSummaryKeyboard(item) }).catch(()=>{});
 });
 
 bot.action(/^dlcat_(.+?)_(.+?)_(.+)$/, async (ctx) => {
@@ -616,7 +608,6 @@ bot.action(/^dlcat_(.+?)_(.+?)_(.+)$/, async (ctx) => {
   if (filtered.length === 0) return ctx.answerCbQuery("Tidak ada data untuk diunduh.", {show_alert:true});
   
   await ctx.answerCbQuery(`Menyiapkan ${format.toUpperCase()}...`).catch(() => {});
-  
   const nums = filtered.map(x => x.phone);
   
   if (format === "txt") {
@@ -666,29 +657,34 @@ bot.on(message("text"), async (ctx) => {
     const numbers = parseNumbersFromText(text);
     if (!numbers.length) return ctx.reply("❌ Tidak ada nomor valid.");
 
-    const max = pending.mode === "global" ? 10 : 100;
-    if (numbers.length > max) return ctx.reply(`❌ Maks ${max} nomor.`);
+    const max = 500; // Batas dinaikkan ke 500
+    if (numbers.length > max) return ctx.reply(`❌ Maks ${max} nomor dalam sekali cek.`);
 
-    const progress = await ctx.reply("✅ <b>PROSES CEK BIO SELESAI!</b>\n───────────────\nLaporan hasil cek bio telah berhasil disusun dan dikirim di bawah ini:", {parse_mode:"HTML"});
+    // 1. Pesan Proses (Akan diubah setelah selesai)
+    const progress = await ctx.reply("⏳ <b>PROSES CEK BIO SEDANG BERJALAN!</b>\n───────────────\nMohon tunggu, sistem sedang memeriksa daftar nomor...", {parse_mode:"HTML"});
     
     try {
       const start = Date.now();
       const result = await engine.checkNumbers(pending.botId, numbers, { batchSize: 5, concurrencyPerBatch: 3, minBatchDelayMs: 500, maxBatchDelayMs: 1500, perNumberTimeoutMs: 8000 });
       const durationMs = Date.now() - start;
-      const reportId = `CB${Date.now().toString().slice(-6)}`; // CB123456
+      const reportId = `CB${Date.now().toString().slice(-6)}`; 
 
       const item: CheckHistoryItem = { id: reportId, userId, mode: pending.mode, botPhone: pending.botPhone, timestamp: new Date().toISOString(), totalNumbers: result.total_checked, durationMs, fullResult: result };
       addHistoryItem(item);
 
-      // Send the TXT Document where the CAPTION serves as the UI (Just like your screenshot 5 & 6)
+      // 2. Edit Pesan Proses Menjadi Selesai
+      await ctx.telegram.editMessageText(ctx.chat!.id, progress.message_id, undefined, `✅ <b>PROSES CEK BIO SELESAI!</b>\n───────────────\nLaporan hasil cek bio telah berhasil disusun dan dikirim di bawah ini:`, {parse_mode:"HTML"}).catch(()=>{});
+
+      // 3. Kirim File + Efek Party 🎉 (ID: 5046509860389126442)
       const txtBuffer = generateTxtReport(result, reportId);
       await ctx.replyWithDocument(
         { source: txtBuffer, filename: `CekBio_LR${Date.now().toString().slice(-8)}_${result.total_checked}Nomor.txt` },
         {
           caption: getSummaryCaption(item),
           parse_mode: "HTML",
+          message_effect_id: "5046509860389126442", // Confetti Effect
           ...getSummaryKeyboard(item)
-        }
+        } as any
       );
 
     } catch (e: unknown) {
