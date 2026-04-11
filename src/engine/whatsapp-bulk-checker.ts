@@ -1,24 +1,20 @@
 import makeWASocket, {
   DisconnectReason,
   fetchLatestBaileysVersion,
-  makeInMemoryStore,
   useMultiFileAuthState,
   WABusinessProfile,
   WASocket,
 } from "@whiskeysockets/baileys";
+import { makeInMemoryStore } from "@whiskeysockets/baileys/lib/Store";
 import pLimit from "p-limit";
 import P from "pino";
 import fs from "node:fs";
 import path from "node:path";
 import { Boom } from "@hapi/boom";
 
-/* =========================================================
- * Types
- * ======================================================= */
-
 type SenderType = "global_sender" | "user_sender";
 
-interface SessionConfig {
+export interface SessionConfig {
   sessionId: string;
   senderType: SenderType;
   label?: string;
@@ -34,30 +30,21 @@ interface SessionRuntime {
   pairingPhone?: string | null;
 }
 
-interface NumberCheckDetail {
+export interface NumberCheckDetail {
   phone: string;
   jid: string;
   isRegistered: boolean;
   bio: string | null;
-
-  // Tipe akun
   type: "business" | "regular" | "unknown";
-
-  // Informasi business profile mentah/ringan
   businessName: string | null;
   verifiedName: string | null;
-
-  // Flag verifikasi penting
   isMetaVerified: boolean;
-  isOfficialBusinessAccount: boolean; // OBA
-
-  // Optional label mentah jika tersedia
+  isOfficialBusinessAccount: boolean;
   verificationLabel: string | null;
-
   error?: string;
 }
 
-interface CheckSummary {
+export interface CheckSummary {
   session_id: string;
   sender_type: SenderType;
   total_checked: number;
@@ -65,11 +52,8 @@ interface CheckSummary {
   unregistered_count: number;
   business_account_count: number;
   regular_account_count: number;
-
-  // Tambahan statistik baru
   meta_verified_count: number;
   oba_count: number;
-
   details: NumberCheckDetail[];
   meta: {
     batch_size: number;
@@ -96,7 +80,7 @@ interface SessionQueueState {
   tasks: QueueTask[];
 }
 
-interface CheckOptions {
+export interface CheckOptions {
   batchSize?: number;
   concurrencyPerBatch?: number;
   minBatchDelayMs?: number;
@@ -104,14 +88,10 @@ interface CheckOptions {
   perNumberTimeoutMs?: number;
 }
 
-interface InitSessionOptions {
+export interface InitSessionOptions {
   phoneNumber?: string;
   onPairingCode?: (sessionId: string, pairingCode: string) => void | Promise<void>;
 }
-
-/* =========================================================
- * Utils
- * ======================================================= */
 
 const logger = P({ level: "info" });
 const store = makeInMemoryStore({ logger: P({ level: "silent" }) });
@@ -120,7 +100,6 @@ const SESSION_ROOT = path.join(process.cwd(), "sessions");
 if (!fs.existsSync(SESSION_ROOT)) fs.mkdirSync(SESSION_ROOT, { recursive: true });
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
 const randomBetween = (min: number, max: number) =>
   Math.floor(Math.random() * (max - min + 1)) + min;
 
@@ -151,63 +130,44 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label = "T
   }
 }
 
-/**
- * Helper untuk membaca properti business profile secara aman.
- * Struktur field bisa berbeda antar versi/proto, jadi gunakan fallback defensif.
- */
-function parseBusinessVerification(profile: any): {
+function parseBusinessVerification(profile: unknown): {
   businessName: string | null;
   verifiedName: string | null;
   isMetaVerified: boolean;
   isOfficialBusinessAccount: boolean;
   verificationLabel: string | null;
 } {
-  if (!profile || typeof profile !== "object") {
-    return {
-      businessName: null,
-      verifiedName: null,
-      isMetaVerified: false,
-      isOfficialBusinessAccount: false,
-      verificationLabel: null,
-    };
-  }
+  const p = (profile ?? {}) as Record<string, unknown>;
 
-  // Nama bisnis umum
   const businessName =
-    profile?.description ??
-    profile?.businessName ??
-    profile?.name ??
+    (p.description as string | undefined) ??
+    (p.businessName as string | undefined) ??
+    (p.name as string | undefined) ??
     null;
 
-  // verified_name biasa ada di payload WA Business tertentu
   const verifiedName =
-    profile?.verified_name ??
-    profile?.verifiedName ??
-    profile?.profileOptions?.verified_name ??
+    (p.verified_name as string | undefined) ??
+    (p.verifiedName as string | undefined) ??
+    ((p.profileOptions as Record<string, unknown> | undefined)?.verified_name as string | undefined) ??
     null;
 
-  // Label verifikasi (fallback, jika tersedia)
   const rawLabel =
-    profile?.verificationLabel ??
-    profile?.verified_level ??
-    profile?.profileOptions?.verificationLabel ??
-    profile?.profileOptions?.verified_level ??
+    (p.verificationLabel as string | undefined) ??
+    (p.verified_level as string | undefined) ??
+    ((p.profileOptions as Record<string, unknown> | undefined)?.verificationLabel as string | undefined) ??
+    ((p.profileOptions as Record<string, unknown> | undefined)?.verified_level as string | undefined) ??
     null;
 
   const labelText = rawLabel ? String(rawLabel).toLowerCase() : "";
 
-  // Meta Verified detection (heuristic multi-field)
   const isMetaVerified =
-    Boolean(verifiedName) ||
-    labelText.includes("meta verified") ||
-    labelText.includes("verified");
+    Boolean(verifiedName) || labelText.includes("meta verified") || labelText.includes("verified");
 
-  // OBA detection (heuristic multi-field)
   const isOfficialBusinessAccount =
     labelText.includes("official business account") ||
     labelText.includes("oba") ||
-    Boolean(profile?.isOfficialBusinessAccount) ||
-    Boolean(profile?.officialBusinessAccount);
+    Boolean(p.isOfficialBusinessAccount) ||
+    Boolean(p.officialBusinessAccount);
 
   return {
     businessName: businessName ? String(businessName) : null,
@@ -217,10 +177,6 @@ function parseBusinessVerification(profile: any): {
     verificationLabel: rawLabel ? String(rawLabel) : null,
   };
 }
-
-/* =========================================================
- * SessionManager
- * ======================================================= */
 
 class SessionManager {
   private sessions = new Map<string, SessionRuntime>();
@@ -326,9 +282,7 @@ class SessionManager {
     });
 
     this.sessions.set(config.sessionId, runtime);
-    if (!this.queues.has(config.sessionId)) {
-      this.queues.set(config.sessionId, { processing: false, tasks: [] });
-    }
+    if (!this.queues.has(config.sessionId)) this.queues.set(config.sessionId, { processing: false, tasks: [] });
 
     if (!sock.authState.creds.registered) {
       if (!options?.phoneNumber) {
@@ -338,15 +292,10 @@ class SessionManager {
           try {
             const cleanNumber = sanitizePhone(options.phoneNumber!);
             const code = await sock.requestPairingCode(cleanNumber);
-
             runtime.pairingCode = code;
             runtime.pairingPhone = cleanNumber;
-
             logger.info(`PAIRING CODE ${config.sessionId}: ${code}`);
-
-            if (options.onPairingCode) {
-              await options.onPairingCode(config.sessionId, code);
-            }
+            if (options.onPairingCode) await options.onPairingCode(config.sessionId, code);
           } catch (error) {
             logger.error(error, `[${config.sessionId}] gagal request pairing code`);
           }
@@ -360,12 +309,10 @@ class SessionManager {
   public async restartSession(sessionId: string, options?: InitSessionOptions): Promise<void> {
     const old = this.sessions.get(sessionId);
     if (!old) throw new Error(`Session ${sessionId} not found`);
-
     try {
       old.sock.end(new Error("Manual restart"));
     } catch {}
     this.sessions.delete(sessionId);
-
     await this.initSession(old.config, options);
   }
 
@@ -399,9 +346,7 @@ class SessionManager {
       });
 
       if (!queue.processing) {
-        this.processQueue(sessionId).catch((e) => {
-          logger.error(e, `[${sessionId}] queue worker crashed`);
-        });
+        this.processQueue(sessionId).catch((e) => logger.error(e, `[${sessionId}] queue worker crashed`));
       }
     });
   }
@@ -435,15 +380,7 @@ class SessionManager {
   }
 }
 
-/* =========================================================
- * Core Bulk Checker
- * ======================================================= */
-
-async function checkSingleNumber(
-  sock: WASocket,
-  rawPhone: string,
-  timeoutMs: number
-): Promise<NumberCheckDetail> {
+async function checkSingleNumber(sock: WASocket, rawPhone: string, timeoutMs: number): Promise<NumberCheckDetail> {
   const phone = sanitizePhone(rawPhone);
   const jid = toJid(phone);
 
@@ -466,16 +403,22 @@ async function checkSingleNumber(
       };
     }
 
-    // ambil bio
     let bio: string | null = null;
     try {
-      const status = await withTimeout(sock.fetchStatus(jid), timeoutMs, "fetchStatus timeout");
-      bio = status?.status || null;
+      const statusResult = await withTimeout(sock.fetchStatus(jid), timeoutMs, "fetchStatus timeout");
+
+      if (typeof statusResult === "string") {
+        bio = statusResult;
+      } else if (statusResult && typeof statusResult === "object") {
+        const maybeObj = statusResult as { status?: unknown };
+        bio = typeof maybeObj.status === "string" ? maybeObj.status : null;
+      } else {
+        bio = null;
+      }
     } catch {
       bio = null;
     }
 
-    // ambil business profile + deteksi verifikasi
     let type: "business" | "regular" | "unknown" = "regular";
     let businessName: string | null = null;
     let verifiedName: string | null = null;
@@ -485,14 +428,13 @@ async function checkSingleNumber(
 
     try {
       const profile = (await withTimeout(
-        sock.businessProfile(jid),
+        sock.getBusinessProfile(jid),
         timeoutMs,
-        "businessProfile timeout"
+        "getBusinessProfile timeout"
       )) as WABusinessProfile | null;
 
       if (profile) {
         type = "business";
-
         const parsed = parseBusinessVerification(profile);
         businessName = parsed.businessName;
         verifiedName = parsed.verifiedName;
@@ -501,7 +443,6 @@ async function checkSingleNumber(
         verificationLabel = parsed.verificationLabel;
       }
     } catch {
-      // jika gagal baca business profile, anggap regular
       type = "regular";
     }
 
@@ -517,7 +458,8 @@ async function checkSingleNumber(
       isOfficialBusinessAccount,
       verificationLabel,
     };
-  } catch (error: any) {
+  } catch (error: unknown) {
+    const errMsg = error instanceof Error ? error.message : "Unknown check error";
     return {
       phone,
       jid,
@@ -529,7 +471,7 @@ async function checkSingleNumber(
       isMetaVerified: false,
       isOfficialBusinessAccount: false,
       verificationLabel: null,
-      error: error?.message || "Unknown check error",
+      error: errMsg,
     };
   }
 }
@@ -539,9 +481,7 @@ async function runBulkCheck(
   phoneNumbersArray: string[],
   opts?: CheckOptions
 ): Promise<CheckSummary> {
-  if (!runtime.isConnected) {
-    throw new Error(`Session ${runtime.config.sessionId} is not connected`);
-  }
+  if (!runtime.isConnected) throw new Error(`Session ${runtime.config.sessionId} is not connected`);
 
   const startedAt = new Date();
 
@@ -559,7 +499,6 @@ async function runBulkCheck(
 
   for (let i = 0; i < batches.length; i++) {
     const batch = batches[i];
-
     const batchResults = await Promise.all(
       batch.map((phone) =>
         limit(async () => {
@@ -572,17 +511,12 @@ async function runBulkCheck(
     details.push(...batchResults);
 
     if (i < batches.length - 1) {
-      const dynamicDelay = randomBetween(minBatchDelayMs, maxBatchDelayMs);
-      await sleep(dynamicDelay);
+      await sleep(randomBetween(minBatchDelayMs, maxBatchDelayMs));
     }
   }
 
   const registered = details.filter((d) => d.isRegistered);
   const unregistered = details.length - registered.length;
-  const businessCount = registered.filter((d) => d.type === "business").length;
-  const regularCount = registered.filter((d) => d.type === "regular").length;
-  const metaVerifiedCount = registered.filter((d) => d.isMetaVerified).length;
-  const obaCount = registered.filter((d) => d.isOfficialBusinessAccount).length;
 
   const finishedAt = new Date();
 
@@ -592,10 +526,10 @@ async function runBulkCheck(
     total_checked: details.length,
     registered_count: registered.length,
     unregistered_count: unregistered,
-    business_account_count: businessCount,
-    regular_account_count: regularCount,
-    meta_verified_count: metaVerifiedCount,
-    oba_count: obaCount,
+    business_account_count: registered.filter((d) => d.type === "business").length,
+    regular_account_count: registered.filter((d) => d.type === "regular").length,
+    meta_verified_count: registered.filter((d) => d.isMetaVerified).length,
+    oba_count: registered.filter((d) => d.isOfficialBusinessAccount).length,
     details,
     meta: {
       batch_size: batchSize,
@@ -608,10 +542,6 @@ async function runBulkCheck(
     },
   };
 }
-
-/* =========================================================
- * Public API
- * ======================================================= */
 
 export class WhatsAppBulkCheckerEngine {
   private sessionManager = new SessionManager();
@@ -636,66 +566,9 @@ export class WhatsAppBulkCheckerEngine {
     return this.sessionManager.getPairingInfo(sessionId);
   }
 
-  async checkNumbers(
-    sessionId: string,
-    phoneNumbersArray: string[],
-    options?: CheckOptions
-  ): Promise<CheckSummary> {
+  async checkNumbers(sessionId: string, phoneNumbersArray: string[], options?: CheckOptions): Promise<CheckSummary> {
     const session = this.sessionManager.getSession(sessionId);
     if (!session) throw new Error(`Session ${sessionId} not found`);
     return this.sessionManager.enqueueCheck(sessionId, phoneNumbersArray, options);
   }
 }
-
-/* =========================================================
- * Example Usage
- * ======================================================= */
-
-async function bootstrapDemo() {
-  const engine = new WhatsAppBulkCheckerEngine();
-
-  await engine.createSession(
-    {
-      sessionId: "user-1775819391798",
-      senderType: "user_sender",
-      label: "User Linked Number",
-    },
-    {
-      phoneNumber: "6281234567890",
-      onPairingCode: async (sessionId, code) => {
-        console.log(`[${sessionId}] Pairing code: ${code}`);
-      },
-    }
-  );
-
-  await sleep(8000);
-
-  const numbers = [
-    "2250713830049",
-    "2250713830008",
-    "2250713830232",
-    "2250713830030",
-    "2250713830005",
-    "2250713830066",
-    "2250713830154",
-    "2250713830288",
-    "2250713830096",
-    "2250713830152",
-  ];
-
-  try {
-    const result = await engine.checkNumbers("user-1775819391798", numbers, {
-      batchSize: 5,
-      concurrencyPerBatch: 3,
-      minBatchDelayMs: 500,
-      maxBatchDelayMs: 1500,
-      perNumberTimeoutMs: 8000,
-    });
-
-    console.dir(result, { depth: null });
-  } catch (err) {
-    console.error("checkNumbers failed:", err);
-  }
-}
-
-// bootstrapDemo().catch(console.error);
