@@ -4,13 +4,18 @@ import ExcelJS from "exceljs";
 import fs from "node:fs";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
-import { WhatsAppBulkCheckerEngine } from "../engine/whatsapp-bulk-checker";
+import {
+  WhatsAppBulkCheckerEngine,
+  SessionConfig,
+  InitSessionOptions,
+} from "../engine/whatsapp-bulk-checker";
 
 /* ===================== TYPES ===================== */
+
 interface PanoramaBot {
   id: string;
   phoneNumber: string;
-  isActive: boolean; // true only when connected
+  isActive: boolean;
   addedAt: string;
   pairingStatus?: "pending_pairing" | "code_sent" | "connected" | "failed" | "logged_out" | "cancelled";
   lastPairingCode?: string | null;
@@ -61,6 +66,7 @@ interface SessionData {
 type BotContext = Context & { session: SessionData };
 
 /* ===================== CONFIG ===================== */
+
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "YOUR_BOT_TOKEN_HERE";
 const ADMIN_IDS = [process.env.ADMIN_ID ? parseInt(process.env.ADMIN_ID, 10) : 0];
 
@@ -69,6 +75,7 @@ const GLOBAL_SESSION_ID = "panorama_global_sender";
 let globalSessionReady = false;
 
 /* ===================== STORAGE ===================== */
+
 const DATA_DIR = path.join(process.cwd(), "panorama_data");
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
@@ -131,10 +138,13 @@ function addHistoryItem(item: CheckHistoryItem) {
 }
 
 function getUserHistory(userId: number, limit = 10): CheckHistoryItem[] {
-  return loadHistory().filter((h) => h.userId === userId).slice(0, limit);
+  return loadHistory()
+    .filter((h) => h.userId === userId)
+    .slice(0, limit);
 }
 
 /* ===================== UTILS ===================== */
+
 function sanitizePhone(raw: string): string {
   return raw.replace(/[^\d]/g, "");
 }
@@ -158,24 +168,26 @@ async function createExcelBuffer(numbers: string[]): Promise<Buffer> {
   return Buffer.isBuffer(data) ? data : Buffer.from(data);
 }
 
-function summaryText(result: any, mode: "user" | "global", botPhone?: string): string {
+function summaryText(result: unknown, mode: "user" | "global", botPhone?: string): string {
+  const res = result as Record<string, unknown>;
   return [
     "📊 *RINGKASAN HASIL CEK*",
     `Mode: ${mode === "user" ? "User" : "Global"}`,
     botPhone ? `Bot: \`${botPhone}\`` : "",
-    `Total: *${result.total_checked}*`,
-    `Terdaftar: *${result.registered_count}*`,
-    `Tidak terdaftar: *${result.unregistered_count}*`,
-    `Business: *${result.business_account_count}*`,
-    `Regular: *${result.regular_account_count}*`,
-    `Meta Verified: *${result.meta_verified_count}*`,
-    `OBA: *${result.oba_count}*`,
+    `Total: *${res.total_checked}*`,
+    `Terdaftar: *${res.registered_count}*`,
+    `Tidak terdaftar: *${res.unregistered_count}*`,
+    `Business: *${res.business_account_count}*`,
+    `Regular: *${res.regular_account_count}*`,
+    `Meta Verified: *${res.meta_verified_count}*`,
+    `OBA: *${res.oba_count}*`,
   ]
     .filter(Boolean)
     .join("\n");
 }
 
 /* ===================== BOT ===================== */
+
 const bot = new Telegraf<BotContext>(BOT_TOKEN);
 bot.use(session({ defaultSession: (): SessionData => ({}) }));
 
@@ -210,6 +222,7 @@ bot.action("back_main", async (ctx) => {
 });
 
 /* ===== Add Bot ===== */
+
 bot.action("menu_tambah_bot", async (ctx) => {
   ctx.session.waitingForBotNumber = true;
   await ctx.editMessageText("Kirim nomor WhatsApp (contoh: 6281234567890)", {
@@ -217,7 +230,7 @@ bot.action("menu_tambah_bot", async (ctx) => {
   });
 });
 
-bot.action(/pair_try_(.+)/, async (ctx) => {
+bot.action(/^pair_try_(.+)$/, async (ctx) => {
   const match = ctx.match as RegExpExecArray;
   const sessionId = match[1];
   const user = getUser(ctx.from.id);
@@ -249,7 +262,7 @@ bot.action(/pair_try_(.+)/, async (ctx) => {
   }
 });
 
-bot.action(/pair_cancel_(.+)/, async (ctx) => {
+bot.action(/^pair_cancel_(.+)$/, async (ctx) => {
   const match = ctx.match as RegExpExecArray;
   const sessionId = match[1];
 
@@ -271,7 +284,8 @@ bot.action(/pair_cancel_(.+)/, async (ctx) => {
   });
 });
 
-/* ===== Bot List (fixed) ===== */
+/* ===== Bot List ===== */
+
 bot.action("menu_daftar_bot", async (ctx) => {
   const user = getUser(ctx.from.id);
   if (!user || user.bots.length === 0) {
@@ -299,33 +313,35 @@ bot.action("menu_daftar_bot", async (ctx) => {
   });
 });
 
-bot.action(/detail_bot_(.+)/, async (ctx) => {
+bot.action(/^detail_bot_(.+)$/, async (ctx) => {
   const match = ctx.match as RegExpExecArray;
   const sessionId = match[1];
   const user = getUser(ctx.from.id);
   const b = user?.bots.find((x) => x.id === sessionId);
   if (!b) return ctx.answerCbQuery("Bot tidak ditemukan");
 
-  await ctx.editMessageText(
+  const isRuntimeConnected = engine.isSessionConnected(b.id);
+
+  const detailText =
     `🔍 *Detail Bot*\n` +
-      `Nomor: ${b.phoneNumber}\n` +
-      `Aktif DB: ${b.isActive ? "Ya" : "Tidak"}\n` +
-      `Status Pairing: ${b.pairingStatus ?? "idle"}\n` +
-      `Runtime Connected: ${engine.isSessionConnected(b.id) ? "Ya" : "Tidak"}\n` +
-      `Last Error: ${b.lastError ?? "-"}`,
-    {
-      parse_mode: "Markdown",
-      ...Markup.inlineKeyboard([
-        [Markup.button.callback("🔁 Try Again", `pair_try_${sessionId}`)],
-        [Markup.button.callback("🛑 Cancel", `pair_cancel_${sessionId}`)],
-        [Markup.button.callback("🗑 Hapus Bot", `delete_bot_${sessionId}`)],
-        [Markup.button.callback("🔙 Kembali", "menu_daftar_bot")],
-      ]),
-    }
-  );
+    `Nomor: ${b.phoneNumber}\n` +
+    `Aktif DB: ${b.isActive ? "Ya" : "Tidak"}\n` +
+    `Status Pairing: ${b.pairingStatus ?? "idle"}\n` +
+    `Runtime Connected: ${isRuntimeConnected ? "Ya" : "Tidak"}\n` +
+    `Last Error: ${b.lastError ?? "-"}`;
+
+  await ctx.editMessageText(detailText, {
+    parse_mode: "Markdown",
+    ...Markup.inlineKeyboard([
+      [Markup.button.callback("🔁 Try Again", `pair_try_${sessionId}`)],
+      [Markup.button.callback("🛑 Cancel", `pair_cancel_${sessionId}`)],
+      [Markup.button.callback("🗑 Hapus Bot", `delete_bot_${sessionId}`)],
+      [Markup.button.callback("🔙 Kembali", "menu_daftar_bot")],
+    ]),
+  });
 });
 
-bot.action(/delete_bot_(.+)/, async (ctx) => {
+bot.action(/^delete_bot_(.+)$/, async (ctx) => {
   const match = ctx.match as RegExpExecArray;
   const sessionId = match[1];
   await engine.deleteSession(sessionId).catch(console.error);
@@ -337,6 +353,7 @@ bot.action(/delete_bot_(.+)/, async (ctx) => {
 });
 
 /* ===== Check Mode ===== */
+
 bot.action("menu_cek_bio", async (ctx) => {
   await ctx.editMessageText("Pilih mode:", {
     ...Markup.inlineKeyboard([
@@ -371,13 +388,15 @@ bot.action("mode_user", async (ctx) => {
   await ctx.editMessageText("Pilih bot aktif:", Markup.inlineKeyboard(buttons, { columns: 1 }));
 });
 
-bot.action(/select_bot_(.+)/, async (ctx) => {
+bot.action(/^select_bot_(.+)$/, async (ctx) => {
   const match = ctx.match as RegExpExecArray;
   const sessionId = match[1];
   const user = getUser(ctx.from.id);
   const b = user?.bots.find((x) => x.id === sessionId);
   if (!b) return;
-  if (!(b.isActive && engine.isSessionConnected(b.id))) return ctx.answerCbQuery("Bot belum aktif");
+  if (!(b.isActive && engine.isSessionConnected(b.id))) {
+    return ctx.answerCbQuery("Bot belum aktif");
+  }
 
   ctx.session.pendingCheck = { mode: "user", botId: b.id, botPhone: b.phoneNumber };
   await ctx.editMessageText("Kirim daftar nomor (maks 100).");
@@ -393,6 +412,7 @@ bot.action("mode_global", async (ctx) => {
 });
 
 /* ===== History ===== */
+
 bot.action("menu_riwayat", async (ctx) => {
   const rows = getUserHistory(ctx.from.id, 10);
   if (!rows.length) {
@@ -403,14 +423,17 @@ bot.action("menu_riwayat", async (ctx) => {
   }
 
   const buttons = rows.map((h, i) =>
-    Markup.button.callback(`${i + 1}. ${new Date(h.timestamp).toLocaleString("id-ID")}`, `history_${h.id}`)
+    Markup.button.callback(
+      `${i + 1}. ${new Date(h.timestamp).toLocaleString("id-ID")}`,
+      `history_${h.id}`
+    )
   );
   buttons.push(Markup.button.callback("🔙 Kembali", "back_main"));
 
   await ctx.editMessageText("📜 Riwayat:", Markup.inlineKeyboard(buttons, { columns: 1 }));
 });
 
-bot.action(/history_(.+)/, async (ctx) => {
+bot.action(/^history_(.+)$/, async (ctx) => {
   const match = ctx.match as RegExpExecArray;
   const id = match[1];
   const item = getUserHistory(ctx.from.id, 100).find((x) => x.id === id);
@@ -425,59 +448,89 @@ bot.action(/history_(.+)/, async (ctx) => {
   });
 });
 
-bot.action(/dl_txt_(.+)/, async (ctx) => {
-  const id = (ctx.match as RegExpExecArray)[1];
+bot.action(/^dl_txt_(.+)$/, async (ctx) => {
+  const match = ctx.match as RegExpExecArray;
+  const id = match[1];
   const item = getUserHistory(ctx.from.id, 100).find((x) => x.id === id);
   if (!item) return;
 
   const content = `ID: ${item.id}\n\n${item.registeredNumbers.join("\n")}`;
-  await ctx.replyWithDocument({ source: Buffer.from(content, "utf-8"), filename: `hasil_${item.id}.txt` });
+  await ctx.replyWithDocument({
+    source: Buffer.from(content, "utf-8"),
+    filename: `hasil_${item.id}.txt`,
+  });
 });
 
-bot.action(/dl_xlsx_(.+)/, async (ctx) => {
-  const id = (ctx.match as RegExpExecArray)[1];
+bot.action(/^dl_xlsx_(.+)$/, async (ctx) => {
+  const match = ctx.match as RegExpExecArray;
+  const id = match[1];
   const item = getUserHistory(ctx.from.id, 100).find((x) => x.id === id);
   if (!item) return;
 
   const buffer = await createExcelBuffer(item.registeredNumbers);
-  await ctx.replyWithDocument({ source: buffer, filename: `hasil_${item.id}.xlsx` });
+  await ctx.replyWithDocument({
+    source: buffer,
+    filename: `hasil_${id}.xlsx`,
+  });
 });
 
 /* ===== Admin global login ===== */
+
 bot.command("globallogin", async (ctx) => {
   if (!ADMIN_IDS.includes(ctx.from.id)) return ctx.reply("Admin only");
   ctx.session.adminWaitingGlobal = true;
   await ctx.reply("Kirim nomor global (contoh: 6281234567890)");
 });
 
+/* ===== Global session init ===== */
+
+async function initGlobalSession() {
+  try {
+    const pairingInfo = engine.getSessionPairingInfo(GLOBAL_SESSION_ID);
+    if (pairingInfo && pairingInfo.isConnected) {
+      globalSessionReady = true;
+      console.log("✅ Global session already connected");
+      return;
+    }
+  } catch {
+    // Session doesn't exist yet, will be created on demand
+  }
+}
+
 /* ===== Text handler ===== */
+
 bot.on(message("text"), async (ctx) => {
   const userId = ctx.from.id;
   const text = ctx.message.text.trim();
 
-  // admin global
+  // admin global setup
   if (ctx.session.adminWaitingGlobal && ADMIN_IDS.includes(userId)) {
     ctx.session.adminWaitingGlobal = false;
     const phone = sanitizePhone(text);
-    if (!phone) return ctx.reply("Nomor salah");
+    if (!phone) return ctx.reply("❌ Nomor salah");
 
-    await engine.createSession(
-      { sessionId: GLOBAL_SESSION_ID, senderType: "global_sender", label: "Panorama Global" },
-      {
-        phoneNumber: phone,
-        onPairingCode: async (_sid, code) => {
-          await ctx.reply(`🔐 GLOBAL PAIRING CODE: \`${code}\``, { parse_mode: "Markdown" });
-        },
-        onConnected: async () => {
-          globalSessionReady = true;
-          await ctx.reply("✅ Global connected.");
-        },
-        onFailed: async (_sid, reason) => {
-          globalSessionReady = false;
-          await ctx.reply(`❌ Global gagal: ${reason}`);
-        },
-      }
-    );
+    const config: SessionConfig = {
+      sessionId: GLOBAL_SESSION_ID,
+      senderType: "global_sender",
+      label: "Panorama Global",
+    };
+
+    const options: InitSessionOptions = {
+      phoneNumber: phone,
+      onPairingCode: async (_sid, code) => {
+        await ctx.reply(`🔐 GLOBAL PAIRING CODE: \`${code}\``, { parse_mode: "Markdown" });
+      },
+      onConnected: async () => {
+        globalSessionReady = true;
+        await ctx.reply("✅ Global connected.");
+      },
+      onFailed: async (_sid, reason) => {
+        globalSessionReady = false;
+        await ctx.reply(`❌ Global gagal: ${reason}`);
+      },
+    };
+
+    await engine.createSession(config, options);
     return;
   }
 
@@ -488,12 +541,18 @@ bot.on(message("text"), async (ctx) => {
     if (!/^\d{8,15}$/.test(phone)) return ctx.reply("❌ Format nomor salah.");
 
     const user = getUser(userId);
-    const existing = user?.bots.find((b) => b.phoneNumber === phone);
+    if (!user) {
+      return ctx.reply("❌ User tidak ditemukan.");
+    }
 
+    const existing = user.bots.find((b) => b.phoneNumber === phone);
+
+    // Case 1: Nomor sudah ada dan sudah connected
     if (existing && existing.isActive && engine.isSessionConnected(existing.id)) {
       return ctx.reply("❌ Nomor sudah terdaftar & aktif.");
     }
 
+    // Case 2: Nomor sudah ada tapi pending/failed => tampilkan Try Again/Cancel
     if (existing && !existing.isActive) {
       return ctx.reply(
         `⚠️ Nomor sudah ada tapi belum connected (${existing.pairingStatus ?? "unknown"}).`,
@@ -504,6 +563,7 @@ bot.on(message("text"), async (ctx) => {
       );
     }
 
+    // Case 3: Nomor baru => buat session baru
     const sessionId = `user_${userId}_${phone}`;
     upsertBot(userId, {
       id: sessionId,
@@ -516,61 +576,65 @@ bot.on(message("text"), async (ctx) => {
       lastError: null,
     });
 
-    await engine.createSession(
-      { sessionId, senderType: "user_sender", label: `User ${userId}` },
-      {
-        phoneNumber: phone,
-        onPairingCode: async (_sid, code) => {
-          upsertBot(userId, {
-            id: sessionId,
-            phoneNumber: phone,
-            isActive: false,
-            addedAt: new Date().toISOString(),
-            pairingStatus: "code_sent",
-            lastPairingCode: code,
-            lastPairingAt: new Date().toISOString(),
-            lastError: null,
-          });
+    const config: SessionConfig = {
+      sessionId,
+      senderType: "user_sender",
+      label: `User ${userId}`,
+    };
 
-          await ctx.reply(`🔐 Pairing (${phone}): \`${code}\``, {
-            parse_mode: "Markdown",
-            ...Markup.inlineKeyboard([
-              [Markup.button.callback("🔁 Try Again", `pair_try_${sessionId}`)],
-              [Markup.button.callback("🛑 Cancel", `pair_cancel_${sessionId}`)],
-            ]),
-          });
-        },
-        onConnected: async () => {
-          upsertBot(userId, {
-            id: sessionId,
-            phoneNumber: phone,
-            isActive: true,
-            addedAt: new Date().toISOString(),
-            pairingStatus: "connected",
-            lastError: null,
-          });
-          await ctx.reply(`✅ ${phone} berhasil terhubung.`);
-        },
-        onFailed: async (_sid, reason) => {
-          upsertBot(userId, {
-            id: sessionId,
-            phoneNumber: phone,
-            isActive: false,
-            addedAt: new Date().toISOString(),
-            pairingStatus: "failed",
-            lastError: reason,
-          });
-          await ctx.reply(
-            `❌ Pairing gagal: ${reason}`,
-            Markup.inlineKeyboard([
-              [Markup.button.callback("🔁 Try Again", `pair_try_${sessionId}`)],
-              [Markup.button.callback("🛑 Cancel", `pair_cancel_${sessionId}`)],
-            ])
-          );
-        },
-      }
-    );
+    const options: InitSessionOptions = {
+      phoneNumber: phone,
+      onPairingCode: async (_sid, code) => {
+        upsertBot(userId, {
+          id: sessionId,
+          phoneNumber: phone,
+          isActive: false,
+          addedAt: new Date().toISOString(),
+          pairingStatus: "code_sent",
+          lastPairingCode: code,
+          lastPairingAt: new Date().toISOString(),
+          lastError: null,
+        });
 
+        await ctx.reply(`🔐 Pairing (${phone}): \`${code}\``, {
+          parse_mode: "Markdown",
+          ...Markup.inlineKeyboard([
+            [Markup.button.callback("🔁 Try Again", `pair_try_${sessionId}`)],
+            [Markup.button.callback("🛑 Cancel", `pair_cancel_${sessionId}`)],
+          ]),
+        });
+      },
+      onConnected: async () => {
+        upsertBot(userId, {
+          id: sessionId,
+          phoneNumber: phone,
+          isActive: true,
+          addedAt: new Date().toISOString(),
+          pairingStatus: "connected",
+          lastError: null,
+        });
+        await ctx.reply(`✅ ${phone} berhasil terhubung.`);
+      },
+      onFailed: async (_sid, reason) => {
+        upsertBot(userId, {
+          id: sessionId,
+          phoneNumber: phone,
+          isActive: false,
+          addedAt: new Date().toISOString(),
+          pairingStatus: "failed",
+          lastError: reason,
+        });
+        await ctx.reply(
+          `❌ Pairing gagal: ${reason}`,
+          Markup.inlineKeyboard([
+            [Markup.button.callback("🔁 Try Again", `pair_try_${sessionId}`)],
+            [Markup.button.callback("🛑 Cancel", `pair_cancel_${sessionId}`)],
+          ])
+        );
+      },
+    };
+
+    await engine.createSession(config, options);
     return;
   }
 
@@ -597,9 +661,16 @@ bot.on(message("text"), async (ctx) => {
       });
       const durationMs = Date.now() - start;
 
-      await ctx.telegram.editMessageText(ctx.chat!.id, progress.message_id, undefined, "✅ Selesai.");
+      await ctx.telegram.editMessageText(
+        ctx.chat!.id,
+        progress.message_id,
+        undefined,
+        "✅ Selesai."
+      );
 
-      const registered = result.details.filter((d) => d.isRegistered).map((d) => d.phone);
+      const registered = result.details
+        .filter((d) => d.isRegistered)
+        .map((d) => d.phone);
       const item: CheckHistoryItem = {
         id: `CB-${randomBytes(3).toString("hex").toUpperCase()}`,
         userId,
@@ -619,10 +690,12 @@ bot.on(message("text"), async (ctx) => {
       };
       addHistoryItem(item);
 
-      await ctx.replyWithMarkdown(summaryText(result, pending.mode, pending.botPhone), Markup.inlineKeyboard([
-        [Markup.button.callback("📄 Download TXT", `dl_txt_${item.id}`)],
-        [Markup.button.callback("📊 Download XLSX", `dl_xlsx_${item.id}`)],
-      ]));
+      await ctx.replyWithMarkdown(summaryText(result, pending.mode, pending.botPhone), 
+        Markup.inlineKeyboard([
+          [Markup.button.callback("📄 Download TXT", `dl_txt_${item.id}`)],
+          [Markup.button.callback("📊 Download XLSX", `dl_xlsx_${item.id}`)],
+        ])
+      );
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : "Unknown error";
       await ctx.reply(`❌ ${msg}`);
@@ -633,6 +706,7 @@ bot.on(message("text"), async (ctx) => {
 });
 
 /* ===================== START ===================== */
+
 async function main() {
   await initGlobalSession();
   await bot.launch();
@@ -640,4 +714,5 @@ async function main() {
   process.once("SIGINT", () => bot.stop("SIGINT"));
   process.once("SIGTERM", () => bot.stop("SIGTERM"));
 }
+
 main().catch(console.error);
