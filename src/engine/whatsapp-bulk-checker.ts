@@ -171,9 +171,6 @@ async function withTimeout<T>(
   }
 }
 
-/**
- * Helper defensif untuk parsing profile bisnis
- */
 function parseBusinessVerification(profile: unknown): {
   businessName: string | null;
   verifiedName: string | null;
@@ -284,17 +281,25 @@ class SessionManager {
     runtime.pairingStatus = "pending_pairing";
     runtime.pairingAttempts += 1;
 
-    const code = await runtime.sock.requestPairingCode(runtime.pairingPhone);
-    runtime.pairingCode = code;
-    runtime.pairingStatus = "code_sent";
-    runtime.lastError = null;
-    logger.info(`PAIRING CODE ${runtime.config.sessionId}: ${code}`);
+    try {
+      const code = await runtime.sock.requestPairingCode(runtime.pairingPhone);
+      runtime.pairingCode = code;
+      runtime.pairingStatus = "code_sent";
+      runtime.lastError = null;
+      logger.info(`PAIRING CODE ${runtime.config.sessionId}: ${code}`);
 
-    if (options?.onPairingCode) {
-      await options.onPairingCode(runtime.config.sessionId, code);
+      if (options?.onPairingCode) {
+        await options.onPairingCode(runtime.config.sessionId, code);
+      }
+      return code;
+    } catch (e: unknown) {
+      runtime.pairingStatus = "failed";
+      runtime.lastError = e instanceof Error ? e.message : "Gagal request pairing code";
+      if (options?.onFailed) {
+        await options.onFailed(runtime.config.sessionId, runtime.lastError);
+      }
+      throw e;
     }
-
-    return code;
   }
 
   public async initSession(
@@ -360,9 +365,7 @@ class SessionManager {
         runtime.lastDisconnectCode = statusCode;
         const isLoggedOut = statusCode === DisconnectReason.loggedOut;
 
-        logger.warn(
-          `[${config.sessionId}] disconnected. code=${statusCode}, loggedOut=${isLoggedOut}`
-        );
+        logger.warn(`[${config.sessionId}] disconnected. code=${statusCode}, loggedOut=${isLoggedOut}`);
 
         if (isLoggedOut) {
           runtime.pairingStatus = "logged_out";
@@ -376,11 +379,14 @@ class SessionManager {
           return;
         }
 
-        // Disconnect dengan kode lain (408, timeout, dll) => failed tapi jangan auto-restart
-        runtime.pairingStatus = "failed";
-        runtime.lastError = `Disconnected code=${statusCode ?? "unknown"}`;
-        if (options?.onFailed) {
-          await options.onFailed(config.sessionId, runtime.lastError);
+        // Jangan set ke failed secara permanen jika itu restart internal dari baileys,
+        // tapi kita beritahu system jika itu putus tanpa sengaja.
+        if (statusCode !== DisconnectReason.restartRequired) {
+            runtime.pairingStatus = "failed";
+            runtime.lastError = `Disconnected code=${statusCode ?? "unknown"}`;
+            if (options?.onFailed) {
+              await options.onFailed(config.sessionId, runtime.lastError);
+            }
         }
       }
     });
@@ -390,22 +396,21 @@ class SessionManager {
       this.queues.set(config.sessionId, { processing: false, tasks: [] });
     }
 
-    // Jika belum registered, request pairing code
     if (!sock.authState.creds.registered) {
       if (!runtime.pairingPhone) {
-        logger.warn(`[${config.sessionId}] phoneNumber tidak diberikan`);
+        logger.warn(`[${config.sessionId}] phoneNumber tidak diberikan untuk pairing`);
       } else {
-        await sleep(2500);
-        try {
-          await this.requestPairingCode(runtime, options);
-        } catch (e: unknown) {
-          runtime.pairingStatus = "failed";
-          runtime.lastError = e instanceof Error ? e.message : "Failed request pairing code";
-          if (options?.onFailed) {
-            await options.onFailed(config.sessionId, runtime.lastError);
+        setTimeout(async () => {
+          try {
+            await this.requestPairingCode(runtime, options);
+          } catch (e) {
+            // Error already handled in requestPairingCode
           }
-        }
+        }, 2500);
       }
+    } else {
+        // Jika sudah terdaftar, set status jadi pending connected (belum open)
+        runtime.pairingStatus = "pending_pairing";
     }
 
     return runtime;
@@ -413,7 +418,7 @@ class SessionManager {
 
   public async retryPairingCode(sessionId: string, phoneNumber?: string): Promise<string> {
     const runtime = this.sessions.get(sessionId);
-    if (!runtime) throw new Error(`Session ${sessionId} not found`);
+    if (!runtime) throw new Error(`Session ${sessionId} not found di memory`);
 
     if (phoneNumber) runtime.pairingPhone = sanitizePhone(phoneNumber);
     if (!runtime.pairingPhone) throw new Error("phoneNumber required");
@@ -423,17 +428,13 @@ class SessionManager {
 
   public async cancelPairing(sessionId: string): Promise<void> {
     const runtime = this.sessions.get(sessionId);
-    if (!runtime) return;
-
-    runtime.pairingStatus = "cancelled";
-    runtime.pairingCode = null;
-
-    try {
-      runtime.sock.end(new Error("Pairing cancelled by user"));
-    } catch {
-      // Ignore
+    if (runtime) {
+        runtime.pairingStatus = "cancelled";
+        runtime.pairingCode = null;
+        try {
+          runtime.sock.end(new Error("Pairing cancelled by user"));
+        } catch { /* Ignore */ }
     }
-
     await this.deleteSession(sessionId);
   }
 
@@ -443,11 +444,9 @@ class SessionManager {
 
     try {
       old.sock.end(new Error("Manual restart"));
-    } catch {
-      // Ignore
-    }
+    } catch { /* Ignore */ }
+    
     this.sessions.delete(sessionId);
-
     await this.initSession(old.config, {
       ...options,
       phoneNumber: options?.phoneNumber ?? old.pairingPhone ?? undefined,
@@ -458,13 +457,11 @@ class SessionManager {
     const s = this.sessions.get(sessionId);
     if (s) {
       try {
+        s.sock.logout();
         s.sock.end(new Error("Session deleted"));
-      } catch {
-        // Ignore
-      }
+      } catch { /* Ignore */ }
       this.sessions.delete(sessionId);
     }
-
     this.queues.delete(sessionId);
 
     const authDir = this.getSessionAuthDir(sessionId);
@@ -547,37 +544,22 @@ async function checkSingleNumber(
 
     if (!isRegistered) {
       return {
-        phone,
-        jid,
-        isRegistered: false,
-        bio: null,
-        type: "unknown",
-        businessName: null,
-        verifiedName: null,
-        isMetaVerified: false,
-        isOfficialBusinessAccount: false,
-        verificationLabel: null,
+        phone, jid, isRegistered: false, bio: null, type: "unknown",
+        businessName: null, verifiedName: null, isMetaVerified: false,
+        isOfficialBusinessAccount: false, verificationLabel: null,
       };
     }
 
     let bio: string | null = null;
     try {
-      const statusResult = await withTimeout(
-        sock.fetchStatus(jid),
-        timeoutMs,
-        "fetchStatus timeout"
-      );
+      const statusResult = await withTimeout(sock.fetchStatus(jid), timeoutMs, "fetchStatus timeout");
       if (typeof statusResult === "string") {
         bio = statusResult;
       } else if (statusResult && typeof statusResult === "object") {
         const maybeObj = statusResult as { status?: unknown };
         bio = typeof maybeObj.status === "string" ? maybeObj.status : null;
-      } else {
-        bio = null;
       }
-    } catch {
-      bio = null;
-    }
+    } catch { /* ignore */ }
 
     let type: "business" | "regular" | "unknown" = "regular";
     let businessName: string | null = null;
@@ -602,36 +584,19 @@ async function checkSingleNumber(
         isOfficialBusinessAccount = parsed.isOfficialBusinessAccount;
         verificationLabel = parsed.verificationLabel;
       }
-    } catch {
-      type = "regular";
-    }
+    } catch { /* ignore */ }
 
     return {
-      phone,
-      jid,
-      isRegistered: true,
-      bio,
-      type,
-      businessName,
-      verifiedName,
-      isMetaVerified,
-      isOfficialBusinessAccount,
-      verificationLabel,
+      phone, jid, isRegistered: true, bio, type,
+      businessName, verifiedName, isMetaVerified,
+      isOfficialBusinessAccount, verificationLabel,
     };
   } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : "Unknown check error";
     return {
-      phone,
-      jid,
-      isRegistered: false,
-      bio: null,
-      type: "unknown",
-      businessName: null,
-      verifiedName: null,
-      isMetaVerified: false,
-      isOfficialBusinessAccount: false,
-      verificationLabel: null,
-      error: msg,
+      phone, jid, isRegistered: false, bio: null, type: "unknown",
+      businessName: null, verifiedName: null, isMetaVerified: false,
+      isOfficialBusinessAccount: false, verificationLabel: null,
+      error: error instanceof Error ? error.message : "Unknown check error",
     };
   }
 }
@@ -646,7 +611,6 @@ async function runBulkCheck(
   }
 
   const startedAt = new Date();
-
   const batchSize = opts?.batchSize ?? 5;
   const concurrencyPerBatch = opts?.concurrencyPerBatch ?? 3;
   const minBatchDelayMs = opts?.minBatchDelayMs ?? 500;
@@ -655,13 +619,11 @@ async function runBulkCheck(
 
   const cleanNumbers = phoneNumbersArray.map(sanitizePhone).filter(Boolean);
   const batches = chunkArray(cleanNumbers, batchSize);
-
   const details: NumberCheckDetail[] = [];
   const limit = pLimit(concurrencyPerBatch);
 
   for (let i = 0; i < batches.length; i++) {
     const batch = batches[i];
-
     const batchResults = await Promise.all(
       batch.map((phone) =>
         limit(async () => {
@@ -670,9 +632,7 @@ async function runBulkCheck(
         })
       )
     );
-
     details.push(...batchResults);
-
     if (i < batches.length - 1) {
       await sleep(randomBetween(minBatchDelayMs, maxBatchDelayMs));
     }
@@ -680,7 +640,6 @@ async function runBulkCheck(
 
   const registered = details.filter((d) => d.isRegistered);
   const unregistered = details.length - registered.length;
-
   const finishedAt = new Date();
 
   return {
