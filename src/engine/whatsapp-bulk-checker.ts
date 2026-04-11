@@ -111,6 +111,18 @@ export interface InitSessionOptions {
   onFailed?: (sessionId: string, reason: string) => void | Promise<void>;
 }
 
+export interface SessionPairingInfo {
+  sessionId: string;
+  pairingPhone: string | null;
+  pairingCode: string | null;
+  pairingStatus: PairingStatus;
+  pairingAttempts: number;
+  isConnected: boolean;
+  isRegistered: boolean;
+  lastDisconnectCode: number | null;
+  lastError: string | null;
+}
+
 /* =========================================================
  * Utils
  * ======================================================= */
@@ -139,10 +151,17 @@ function toJid(phone: string): string {
   return `${sanitizePhone(phone)}@s.whatsapp.net`;
 }
 
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label = "Timeout"): Promise<T> {
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  label = "Timeout"
+): Promise<T> {
   let timeoutHandle: NodeJS.Timeout | undefined;
   const timeoutPromise = new Promise<never>((_, reject) => {
-    timeoutHandle = setTimeout(() => reject(new Error(`${label} after ${timeoutMs}ms`)), timeoutMs);
+    timeoutHandle = setTimeout(
+      () => reject(new Error(`${label} after ${timeoutMs}ms`)),
+      timeoutMs
+    );
   });
 
   try {
@@ -173,14 +192,19 @@ function parseBusinessVerification(profile: unknown): {
   const verifiedName =
     (p.verified_name as string | undefined) ??
     (p.verifiedName as string | undefined) ??
-    ((p.profileOptions as Record<string, unknown> | undefined)?.verified_name as string | undefined) ??
+    ((p.profileOptions as Record<string, unknown> | undefined)?.verified_name as
+      | string
+      | undefined) ??
     null;
 
   const rawLabel =
     (p.verificationLabel as string | undefined) ??
     (p.verified_level as string | undefined) ??
-    ((p.profileOptions as Record<string, unknown> | undefined)?.verificationLabel as string | undefined) ??
-    ((p.profileOptions as Record<string, unknown> | undefined)?.verified_level as string | undefined) ??
+    ((p.profileOptions as Record<string, unknown> | undefined)
+      ?.verificationLabel as string | undefined) ??
+    ((p.profileOptions as Record<string, unknown> | undefined)?.verified_level as
+      | string
+      | undefined) ??
     null;
 
   const labelText = rawLabel ? String(rawLabel).toLowerCase() : "";
@@ -235,7 +259,7 @@ class SessionManager {
     };
   }
 
-  public getPairingInfo(sessionId: string) {
+  public getPairingInfo(sessionId: string): SessionPairingInfo | null {
     const s = this.sessions.get(sessionId);
     if (!s) return null;
     return {
@@ -273,7 +297,10 @@ class SessionManager {
     return code;
   }
 
-  public async initSession(config: SessionConfig, options?: InitSessionOptions): Promise<SessionRuntime> {
+  public async initSession(
+    config: SessionConfig,
+    options?: InitSessionOptions
+  ): Promise<SessionRuntime> {
     const existing = this.sessions.get(config.sessionId);
     if (existing) return existing;
 
@@ -333,22 +360,28 @@ class SessionManager {
         runtime.lastDisconnectCode = statusCode;
         const isLoggedOut = statusCode === DisconnectReason.loggedOut;
 
-        logger.warn(`[${config.sessionId}] disconnected. code=${statusCode}, loggedOut=${isLoggedOut}`);
+        logger.warn(
+          `[${config.sessionId}] disconnected. code=${statusCode}, loggedOut=${isLoggedOut}`
+        );
 
         if (isLoggedOut) {
           runtime.pairingStatus = "logged_out";
           runtime.lastError = "Logged out / auth invalid";
 
-          if (options?.onFailed) await options.onFailed(config.sessionId, runtime.lastError);
+          if (options?.onFailed) {
+            await options.onFailed(config.sessionId, runtime.lastError);
+          }
 
           await this.deleteSession(config.sessionId);
           return;
         }
 
-        // Tidak auto restart agresif lagi supaya tidak race dengan user input code
+        // Disconnect dengan kode lain (408, timeout, dll) => failed tapi jangan auto-restart
         runtime.pairingStatus = "failed";
         runtime.lastError = `Disconnected code=${statusCode ?? "unknown"}`;
-        if (options?.onFailed) await options.onFailed(config.sessionId, runtime.lastError);
+        if (options?.onFailed) {
+          await options.onFailed(config.sessionId, runtime.lastError);
+        }
       }
     });
 
@@ -357,6 +390,7 @@ class SessionManager {
       this.queues.set(config.sessionId, { processing: false, tasks: [] });
     }
 
+    // Jika belum registered, request pairing code
     if (!sock.authState.creds.registered) {
       if (!runtime.pairingPhone) {
         logger.warn(`[${config.sessionId}] phoneNumber tidak diberikan`);
@@ -367,7 +401,9 @@ class SessionManager {
         } catch (e: unknown) {
           runtime.pairingStatus = "failed";
           runtime.lastError = e instanceof Error ? e.message : "Failed request pairing code";
-          if (options?.onFailed) await options.onFailed(config.sessionId, runtime.lastError);
+          if (options?.onFailed) {
+            await options.onFailed(config.sessionId, runtime.lastError);
+          }
         }
       }
     }
@@ -394,7 +430,9 @@ class SessionManager {
 
     try {
       runtime.sock.end(new Error("Pairing cancelled by user"));
-    } catch {}
+    } catch {
+      // Ignore
+    }
 
     await this.deleteSession(sessionId);
   }
@@ -405,7 +443,9 @@ class SessionManager {
 
     try {
       old.sock.end(new Error("Manual restart"));
-    } catch {}
+    } catch {
+      // Ignore
+    }
     this.sessions.delete(sessionId);
 
     await this.initSession(old.config, {
@@ -419,17 +459,25 @@ class SessionManager {
     if (s) {
       try {
         s.sock.end(new Error("Session deleted"));
-      } catch {}
+      } catch {
+        // Ignore
+      }
       this.sessions.delete(sessionId);
     }
 
     this.queues.delete(sessionId);
 
     const authDir = this.getSessionAuthDir(sessionId);
-    if (fs.existsSync(authDir)) fs.rmSync(authDir, { recursive: true, force: true });
+    if (fs.existsSync(authDir)) {
+      fs.rmSync(authDir, { recursive: true, force: true });
+    }
   }
 
-  public enqueueCheck(sessionId: string, numbers: string[], options?: CheckOptions): Promise<CheckSummary> {
+  public enqueueCheck(
+    sessionId: string,
+    numbers: string[],
+    options?: CheckOptions
+  ): Promise<CheckSummary> {
     const queue = this.queues.get(sessionId);
     if (!queue) throw new Error(`Queue for session ${sessionId} not initialized`);
 
@@ -494,7 +542,8 @@ async function checkSingleNumber(
 
   try {
     const waCheck = await withTimeout(sock.onWhatsApp(jid), timeoutMs, "onWhatsApp timeout");
-    const isRegistered = Array.isArray(waCheck) && waCheck.length > 0 && Boolean(waCheck[0]?.exists);
+    const isRegistered =
+      Array.isArray(waCheck) && waCheck.length > 0 && Boolean(waCheck[0]?.exists);
 
     if (!isRegistered) {
       return {
@@ -513,7 +562,11 @@ async function checkSingleNumber(
 
     let bio: string | null = null;
     try {
-      const statusResult = await withTimeout(sock.fetchStatus(jid), timeoutMs, "fetchStatus timeout");
+      const statusResult = await withTimeout(
+        sock.fetchStatus(jid),
+        timeoutMs,
+        "fetchStatus timeout"
+      );
       if (typeof statusResult === "string") {
         bio = statusResult;
       } else if (statusResult && typeof statusResult === "object") {
