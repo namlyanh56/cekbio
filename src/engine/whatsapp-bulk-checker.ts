@@ -127,7 +127,6 @@ export interface SessionPairingInfo {
  * Utils
  * ======================================================= */
 
-// GLOBAL LOGGER DIUBAH KE TRACE
 const logger = P({ level: "trace" });
 
 const SESSION_ROOT = path.join(process.cwd(), "sessions");
@@ -268,7 +267,6 @@ class SessionManager {
     } catch (e: unknown) {
       const errorMsg = e instanceof Error ? e.message : JSON.stringify(e);
       console.error(`❌ [DEBUG] GAGAL MEMINTA KODE PAIRING! ALASAN:`, errorMsg);
-      console.error(e); // Print full stack trace
 
       runtime.pairingStatus = "failed";
       runtime.lastError = errorMsg;
@@ -286,7 +284,7 @@ class SessionManager {
     const existing = this.sessions.get(config.sessionId);
     if (existing) return existing;
 
-    console.log(`🔄 [DEBUG] Inisialisasi Session Baru: ${config.sessionId}`);
+    console.log(`🔄 [DEBUG] Inisialisasi Session: ${config.sessionId}`);
 
     const authDir = this.getSessionAuthDir(config.sessionId);
     fs.mkdirSync(authDir, { recursive: true });
@@ -298,8 +296,7 @@ class SessionManager {
       auth: state,
       version,
       printQRInTerminal: false,
-      logger: P({ level: "trace" }), // <--- TRACE DIAKTIFKAN UNTUK BAILEYS
-      // BROWSER DIUBAH KE FORMAT YANG LEBIH AMAN AGAR TIDAK DIBLOKIR WA
+      logger: P({ level: "trace" }), 
       browser: ["Ubuntu", "Chrome", "20.0.04"], 
       markOnlineOnConnect: false,
       generateHighQualityLinkPreview: false,
@@ -350,7 +347,7 @@ class SessionManager {
         const errorMessage = boomError?.message || JSON.stringify(boomError);
         const isLoggedOut = statusCode === DisconnectReason.loggedOut;
 
-        console.warn(`⚠️ [DEBUG] [${config.sessionId}] KONEKSI TERPUTUS. Code: ${statusCode}, Error: ${errorMessage}, LoggedOut: ${isLoggedOut}`);
+        console.warn(`⚠️ [DEBUG] [${config.sessionId}] KONEKSI TERPUTUS. Code: ${statusCode}, Error: ${errorMessage}`);
 
         if (isLoggedOut) {
           runtime.pairingStatus = "logged_out";
@@ -364,14 +361,23 @@ class SessionManager {
           return;
         }
 
-        if (statusCode !== DisconnectReason.restartRequired) {
+        // === PERBAIKAN UTAMA DI SINI ===
+        if (statusCode === DisconnectReason.restartRequired) {
+            console.log(`🔄 [DEBUG] [${config.sessionId}] Memulai ulang sesi otomatis karena WA meminta restart (Kode 515)...`);
+            // Hapus sesi saat ini agar tidak tumpang tindih
+            this.sessions.delete(config.sessionId);
+            
+            // Jeda 2 detik lalu jalankan initSession lagi
+            setTimeout(() => {
+                this.initSession(config, options).catch(e => console.error("Auto-restart error:", e));
+            }, 2000);
+        } else {
+            // Jika terputus karena error lain (Timeout/Network)
             runtime.pairingStatus = "failed";
             runtime.lastError = `Disconnected code=${statusCode ?? "unknown"}`;
             if (options?.onFailed) {
               await options.onFailed(config.sessionId, runtime.lastError);
             }
-        } else {
-            console.log(`🔄 [DEBUG] Baileys meminta restart internal (biasanya aman).`);
         }
       }
     });
@@ -385,12 +391,11 @@ class SessionManager {
       if (!runtime.pairingPhone) {
         console.warn(`⚠️ [DEBUG] [${config.sessionId}] phoneNumber tidak diberikan untuk pairing`);
       } else {
-        // Jeda waktu ditambah menjadi 3500ms untuk memastikan WebSocket benar-benar siap
         setTimeout(async () => {
           try {
             await this.requestPairingCode(runtime, options);
           } catch (e) {
-            console.error("❌ [DEBUG] Gagal di setTimeout requestPairingCode", e);
+            console.error("❌ [DEBUG] Gagal requestPairingCode", e);
           }
         }, 3500);
       }
