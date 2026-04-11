@@ -127,7 +127,8 @@ export interface SessionPairingInfo {
  * Utils
  * ======================================================= */
 
-const logger = P({ level: "info" });
+// GLOBAL LOGGER DIUBAH KE TRACE
+const logger = P({ level: "trace" });
 
 const SESSION_ROOT = path.join(process.cwd(), "sessions");
 if (!fs.existsSync(SESSION_ROOT)) fs.mkdirSync(SESSION_ROOT, { recursive: true });
@@ -179,43 +180,12 @@ function parseBusinessVerification(profile: unknown): {
   verificationLabel: string | null;
 } {
   const p = (profile ?? {}) as Record<string, unknown>;
-
-  const businessName =
-    (p.description as string | undefined) ??
-    (p.businessName as string | undefined) ??
-    (p.name as string | undefined) ??
-    null;
-
-  const verifiedName =
-    (p.verified_name as string | undefined) ??
-    (p.verifiedName as string | undefined) ??
-    ((p.profileOptions as Record<string, unknown> | undefined)?.verified_name as
-      | string
-      | undefined) ??
-    null;
-
-  const rawLabel =
-    (p.verificationLabel as string | undefined) ??
-    (p.verified_level as string | undefined) ??
-    ((p.profileOptions as Record<string, unknown> | undefined)
-      ?.verificationLabel as string | undefined) ??
-    ((p.profileOptions as Record<string, unknown> | undefined)?.verified_level as
-      | string
-      | undefined) ??
-    null;
-
+  const businessName = (p.description as string | undefined) ?? (p.businessName as string | undefined) ?? (p.name as string | undefined) ?? null;
+  const verifiedName = (p.verified_name as string | undefined) ?? (p.verifiedName as string | undefined) ?? ((p.profileOptions as Record<string, unknown> | undefined)?.verified_name as string | undefined) ?? null;
+  const rawLabel = (p.verificationLabel as string | undefined) ?? (p.verified_level as string | undefined) ?? ((p.profileOptions as Record<string, unknown> | undefined)?.verificationLabel as string | undefined) ?? ((p.profileOptions as Record<string, unknown> | undefined)?.verified_level as string | undefined) ?? null;
   const labelText = rawLabel ? String(rawLabel).toLowerCase() : "";
-
-  const isMetaVerified =
-    Boolean(verifiedName) ||
-    labelText.includes("meta verified") ||
-    labelText.includes("verified");
-
-  const isOfficialBusinessAccount =
-    labelText.includes("official business account") ||
-    labelText.includes("oba") ||
-    Boolean(p.isOfficialBusinessAccount) ||
-    Boolean(p.officialBusinessAccount);
+  const isMetaVerified = Boolean(verifiedName) || labelText.includes("meta verified") || labelText.includes("verified");
+  const isOfficialBusinessAccount = labelText.includes("official business account") || labelText.includes("oba") || Boolean(p.isOfficialBusinessAccount) || Boolean(p.officialBusinessAccount);
 
   return {
     businessName: businessName ? String(businessName) : null,
@@ -282,19 +252,26 @@ class SessionManager {
     runtime.pairingAttempts += 1;
 
     try {
+      console.log(`⏳ [DEBUG] MEMINTA KODE PAIRING UNTUK NOMOR: ${runtime.pairingPhone}...`);
+      
       const code = await runtime.sock.requestPairingCode(runtime.pairingPhone);
+      
       runtime.pairingCode = code;
       runtime.pairingStatus = "code_sent";
       runtime.lastError = null;
-      logger.info(`PAIRING CODE ${runtime.config.sessionId}: ${code}`);
+      console.log(`✅ [DEBUG] KODE PAIRING BERHASIL DIDAPATKAN: ${code}`);
 
       if (options?.onPairingCode) {
         await options.onPairingCode(runtime.config.sessionId, code);
       }
       return code;
     } catch (e: unknown) {
+      const errorMsg = e instanceof Error ? e.message : JSON.stringify(e);
+      console.error(`❌ [DEBUG] GAGAL MEMINTA KODE PAIRING! ALASAN:`, errorMsg);
+      console.error(e); // Print full stack trace
+
       runtime.pairingStatus = "failed";
-      runtime.lastError = e instanceof Error ? e.message : "Gagal request pairing code";
+      runtime.lastError = errorMsg;
       if (options?.onFailed) {
         await options.onFailed(runtime.config.sessionId, runtime.lastError);
       }
@@ -309,6 +286,8 @@ class SessionManager {
     const existing = this.sessions.get(config.sessionId);
     if (existing) return existing;
 
+    console.log(`🔄 [DEBUG] Inisialisasi Session Baru: ${config.sessionId}`);
+
     const authDir = this.getSessionAuthDir(config.sessionId);
     fs.mkdirSync(authDir, { recursive: true });
 
@@ -319,8 +298,9 @@ class SessionManager {
       auth: state,
       version,
       printQRInTerminal: false,
-      logger: P({ level: "silent" }),
-      browser: ["Chrome (Linux)", "Chrome", "1.0.0"],
+      logger: P({ level: "trace" }), // <--- TRACE DIAKTIFKAN UNTUK BAILEYS
+      // BROWSER DIUBAH KE FORMAT YANG LEBIH AMAN AGAR TIDAK DIBLOKIR WA
+      browser: ["Ubuntu", "Chrome", "20.0.04"], 
       markOnlineOnConnect: false,
       generateHighQualityLinkPreview: false,
       syncFullHistory: false,
@@ -347,12 +327,16 @@ class SessionManager {
       const { connection, lastDisconnect } = update;
       runtime.lastSeenAt = Date.now();
 
+      if (connection) {
+        console.log(`📡 [DEBUG] Status Koneksi WhatsApp: ${connection}`);
+      }
+
       if (connection === "open") {
         runtime.isConnected = true;
         runtime.pairingCode = null;
         runtime.pairingStatus = "connected";
         runtime.lastError = null;
-        logger.info(`[${config.sessionId}] connected`);
+        console.log(`✅ [DEBUG] [${config.sessionId}] KONEKSI TERBUKA (BERHASIL TAUTAN!)`);
 
         if (options?.onConnected) {
           await options.onConnected(config.sessionId);
@@ -361,11 +345,12 @@ class SessionManager {
 
       if (connection === "close") {
         runtime.isConnected = false;
-        const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode ?? null;
-        runtime.lastDisconnectCode = statusCode;
+        const boomError = lastDisconnect?.error as Boom;
+        const statusCode = boomError?.output?.statusCode ?? null;
+        const errorMessage = boomError?.message || JSON.stringify(boomError);
         const isLoggedOut = statusCode === DisconnectReason.loggedOut;
 
-        logger.warn(`[${config.sessionId}] disconnected. code=${statusCode}, loggedOut=${isLoggedOut}`);
+        console.warn(`⚠️ [DEBUG] [${config.sessionId}] KONEKSI TERPUTUS. Code: ${statusCode}, Error: ${errorMessage}, LoggedOut: ${isLoggedOut}`);
 
         if (isLoggedOut) {
           runtime.pairingStatus = "logged_out";
@@ -379,14 +364,14 @@ class SessionManager {
           return;
         }
 
-        // Jangan set ke failed secara permanen jika itu restart internal dari baileys,
-        // tapi kita beritahu system jika itu putus tanpa sengaja.
         if (statusCode !== DisconnectReason.restartRequired) {
             runtime.pairingStatus = "failed";
             runtime.lastError = `Disconnected code=${statusCode ?? "unknown"}`;
             if (options?.onFailed) {
               await options.onFailed(config.sessionId, runtime.lastError);
             }
+        } else {
+            console.log(`🔄 [DEBUG] Baileys meminta restart internal (biasanya aman).`);
         }
       }
     });
@@ -398,18 +383,18 @@ class SessionManager {
 
     if (!sock.authState.creds.registered) {
       if (!runtime.pairingPhone) {
-        logger.warn(`[${config.sessionId}] phoneNumber tidak diberikan untuk pairing`);
+        console.warn(`⚠️ [DEBUG] [${config.sessionId}] phoneNumber tidak diberikan untuk pairing`);
       } else {
+        // Jeda waktu ditambah menjadi 3500ms untuk memastikan WebSocket benar-benar siap
         setTimeout(async () => {
           try {
             await this.requestPairingCode(runtime, options);
           } catch (e) {
-            // Error already handled in requestPairingCode
+            console.error("❌ [DEBUG] Gagal di setTimeout requestPairingCode", e);
           }
-        }, 2500);
+        }, 3500);
       }
     } else {
-        // Jika sudah terdaftar, set status jadi pending connected (belum open)
         runtime.pairingStatus = "pending_pairing";
     }
 
@@ -539,15 +524,10 @@ async function checkSingleNumber(
 
   try {
     const waCheck = await withTimeout(sock.onWhatsApp(jid), timeoutMs, "onWhatsApp timeout");
-    const isRegistered =
-      Array.isArray(waCheck) && waCheck.length > 0 && Boolean(waCheck[0]?.exists);
+    const isRegistered = Array.isArray(waCheck) && waCheck.length > 0 && Boolean(waCheck[0]?.exists);
 
     if (!isRegistered) {
-      return {
-        phone, jid, isRegistered: false, bio: null, type: "unknown",
-        businessName: null, verifiedName: null, isMetaVerified: false,
-        isOfficialBusinessAccount: false, verificationLabel: null,
-      };
+      return { phone, jid, isRegistered: false, bio: null, type: "unknown", businessName: null, verifiedName: null, isMetaVerified: false, isOfficialBusinessAccount: false, verificationLabel: null };
     }
 
     let bio: string | null = null;
@@ -569,12 +549,7 @@ async function checkSingleNumber(
     let verificationLabel: string | null = null;
 
     try {
-      const profile = (await withTimeout(
-        sock.getBusinessProfile(jid),
-        timeoutMs,
-        "getBusinessProfile timeout"
-      )) as WABusinessProfile | null;
-
+      const profile = (await withTimeout(sock.getBusinessProfile(jid), timeoutMs, "getBusinessProfile timeout")) as WABusinessProfile | null;
       if (profile) {
         type = "business";
         const parsed = parseBusinessVerification(profile);
@@ -586,18 +561,9 @@ async function checkSingleNumber(
       }
     } catch { /* ignore */ }
 
-    return {
-      phone, jid, isRegistered: true, bio, type,
-      businessName, verifiedName, isMetaVerified,
-      isOfficialBusinessAccount, verificationLabel,
-    };
+    return { phone, jid, isRegistered: true, bio, type, businessName, verifiedName, isMetaVerified, isOfficialBusinessAccount, verificationLabel };
   } catch (error: unknown) {
-    return {
-      phone, jid, isRegistered: false, bio: null, type: "unknown",
-      businessName: null, verifiedName: null, isMetaVerified: false,
-      isOfficialBusinessAccount: false, verificationLabel: null,
-      error: error instanceof Error ? error.message : "Unknown check error",
-    };
+    return { phone, jid, isRegistered: false, bio: null, type: "unknown", businessName: null, verifiedName: null, isMetaVerified: false, isOfficialBusinessAccount: false, verificationLabel: null, error: error instanceof Error ? error.message : "Unknown check error" };
   }
 }
 
