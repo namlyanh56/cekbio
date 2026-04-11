@@ -129,8 +129,9 @@ function saveHistory(history: CheckHistoryItem[]) {
 }
 
 function addHistoryItem(item: CheckHistoryItem) {
-  const history = loadHistory();
+  let history = loadHistory();
   history.unshift(item);
+  if (history.length > 200) history = history.slice(0, 200);
   saveHistory(history);
 }
 
@@ -248,11 +249,13 @@ function getSummaryCaption(item: CheckHistoryItem): string {
   const details = summary.details;
   const adaBio = details.filter(d => d.bio).length;
   const tanpaBio = details.filter(d => d.isRegistered && !d.bio).length;
-  const dateStr = new Date(item.timestamp).toLocaleString("id-ID");
+  
+  const d = new Date(item.timestamp);
+  const dateStr = `${d.getDate()}/${d.getMonth()+1}/${d.getFullYear()}, ${d.getHours().toString().padStart(2,'0')}.${d.getMinutes().toString().padStart(2,'0')}.${d.getSeconds().toString().padStart(2,'0')}`;
   const durasiSec = (item.durationMs / 1000).toFixed(1);
 
   return `📊 <b>RINGKASAN HASIL CEK BIO</b> 📊
-───────────────
+
 ℹ️ <b>INFO LAPORAN CEK BIO:</b>
 <blockquote>L 🤖 Sender: ${item.mode === "user" ? "User (Pribadi)" : "Global"} ”
 L 👤 Nama: <b>${escapeHTML(getUser(item.userId)?.firstName || "User")}</b>
@@ -328,13 +331,15 @@ bot.start(async (ctx) => {
 });
 
 bot.action("back_main", async (ctx) => {
-  await ctx.answerCbQuery().catch(() => {});
-  const user = getUser(ctx.from.id);
-  if(!user) return;
-  await ctx.editMessageText(generateMainMenuHTML(user), { parse_mode: "HTML" }).catch(() => {});
+  try {
+    await ctx.answerCbQuery().catch(() => {});
+    const user = getUser(ctx.from.id);
+    if(!user) return;
+    await ctx.editMessageText(generateMainMenuHTML(user), { parse_mode: "HTML" }).catch(() => {});
+  } catch(e) {}
 });
 
-/* ===================== REPLY KEYBOARD HANDLERS (4 MAIN MENUS) ===================== */
+/* ===================== REPLY KEYBOARD HANDLERS ===================== */
 
 bot.hears("📱 Cek Bio", async (ctx) => {
   ctx.session.waitingForBotNumber = false; 
@@ -389,26 +394,25 @@ bot.hears("➕ Tambah Bot", async (ctx) => {
 });
 
 bot.action("menu_tambah_bot", async (ctx) => {
-  await ctx.answerCbQuery().catch(() => {});
-  ctx.session.waitingForBotNumber = true;
-  ctx.session.pendingCheck = undefined;
-  await ctx.editMessageText(`➕ <b>TAMBAH BOT USER</b>\n───────────────\n<blockquote>Kirim nomor WhatsApp yang akan dijadikan sender. ”\nPastikan nomor aktif.\n\n<b>Contoh Format:</b>\n6281234567890\n+6281234567890\n+748394834\n2348948394</blockquote>\n<i>Kirim nomor sekarang:</i>`, { parse_mode: "HTML" }).catch(() => {});
+  try {
+    await ctx.answerCbQuery().catch(() => {});
+    ctx.session.waitingForBotNumber = true;
+    ctx.session.pendingCheck = undefined;
+    await ctx.editMessageText(`➕ <b>TAMBAH BOT USER</b>\n───────────────\n<blockquote>Kirim nomor WhatsApp yang akan dijadikan sender. ”\nPastikan nomor aktif.\n\n<b>Contoh Format:</b>\n6281234567890\n+6281234567890\n+748394834\n2348948394</blockquote>\n<i>Kirim nomor sekarang:</i>`, { parse_mode: "HTML" }).catch(() => {});
+  } catch(e) {}
 });
 
 /* ===================== ADD BOT & PAIRING ===================== */
 
-// Fungsi ini diubah agar mendukung 'silent run' saat bot restart (ctx = null)
 async function startUserBotSession(ctx: Context | null, userId: number, phone: string, sessionId: string) {
     const config: SessionConfig = { sessionId, senderType: "user_sender", label: `User ${userId}` };
     const options: InitSessionOptions = {
       phoneNumber: phone,
       onPairingCode: async (_sid, code) => {
         upsertBot(userId, { id: sessionId, phoneNumber: phone, isActive: false, addedAt: new Date().toISOString(), pairingStatus: "code_sent", lastPairingCode: code, lastPairingAt: new Date().toISOString(), lastError: null });
-        
         if (ctx) {
             const text = `🔐 <b>KODE PAIRING</b>\n───────────────\n👤 <b>Sender:</b> <code>${phone}</code>\n\nKode pairing: <code>${code}</code>`;
             const kbd = Markup.inlineKeyboard([[Markup.button.callback("🔁 Try Again", `pair_try_${sessionId}`), Markup.button.callback("🛑 Cancel", `pair_cancel_${sessionId}`)]]);
-
             if (pairingMessageTracker[sessionId]) {
                 await ctx.telegram.editMessageText(ctx.chat!.id, pairingMessageTracker[sessionId], undefined, text, { parse_mode: "HTML", ...kbd }).catch(()=>{});
             } else {
@@ -419,8 +423,6 @@ async function startUserBotSession(ctx: Context | null, userId: number, phone: s
       },
       onConnected: async () => {
         upsertBot(userId, { id: sessionId, phoneNumber: phone, isActive: true, addedAt: new Date().toISOString(), pairingStatus: "connected", lastError: null });
-        console.log(`[STARTUP] Bot ${phone} berhasil terhubung.`);
-        
         if (ctx) {
             const text = `✅ <b>KONEKSI BERHASIL</b>\n───────────────\n👤 <b>Sender:</b> <code>${phone}</code>\n\n✅ Berhasil terhubung dan siap digunakan!`;
             if (pairingMessageTracker[sessionId]) {
@@ -433,7 +435,6 @@ async function startUserBotSession(ctx: Context | null, userId: number, phone: s
       },
       onFailed: async (_sid, reason) => {
         upsertBot(userId, { id: sessionId, phoneNumber: phone, isActive: false, addedAt: new Date().toISOString(), pairingStatus: "failed", lastError: reason });
-        
         if (ctx) {
             const text = `❌ <b>KONEKSI GAGAL</b>\n───────────────\n👤 <b>Sender:</b> <code>${phone}</code>\n\n⚠️ Error/Terputus: ${escapeHTML(reason)}`;
             const kbd = Markup.inlineKeyboard([[Markup.button.callback("🔁 Try Again", `pair_try_${sessionId}`), Markup.button.callback("🛑 Cancel", `pair_cancel_${sessionId}`)]]);
@@ -448,7 +449,6 @@ async function startUserBotSession(ctx: Context | null, userId: number, phone: s
     await engine.createSession(config, options);
 }
 
-// Fungsi otomatisasi reconnect bot user saat server/PM2 direstart
 async function initAllUserSessions() {
     console.log("🔄 [STARTUP] Menghubungkan ulang bot-bot yang aktif di database...");
     const users = loadUsers();
@@ -456,9 +456,7 @@ async function initAllUserSessions() {
         if (!user.bots) continue;
         for (const b of user.bots) {
             if (b.pairingStatus === "connected" || b.isActive) {
-                console.log(`[STARTUP] Reconnecting ${b.phoneNumber}...`);
                 await startUserBotSession(null, user.userId, b.phoneNumber, b.id);
-                // Jeda 1 detik agar tidak membombardir server WhatsApp
                 await new Promise(r => setTimeout(r, 1000));
             }
         }
@@ -466,11 +464,11 @@ async function initAllUserSessions() {
 }
 
 bot.action(/^pair_try_(.+)$/, async (ctx) => {
-  const sessionId = (ctx.match as RegExpExecArray)[1];
-  const b = getUser(ctx.from.id)?.bots?.find((x) => x.id === sessionId);
-  if (!b) return ctx.answerCbQuery("Bot tidak ditemukan", { show_alert: true });
-
   try {
+    const sessionId = (ctx.match as RegExpExecArray)[1];
+    const b = getUser(ctx.from.id)?.bots?.find((x) => x.id === sessionId);
+    if (!b) return ctx.answerCbQuery("Bot tidak ditemukan", { show_alert: true });
+
     const info = engine.getSessionPairingInfo(sessionId);
     if (!info) return ctx.answerCbQuery("Sesi tidak aktif. Silakan hapus dan tambah ulang bot.", { show_alert: true });
 
@@ -483,15 +481,17 @@ bot.action(/^pair_try_(.+)$/, async (ctx) => {
 });
 
 bot.action(/^pair_cancel_(.+)$/, async (ctx) => {
-  const sessionId = (ctx.match as RegExpExecArray)[1];
-  await engine.cancelPairing(sessionId);
-  removeBotFromUser(ctx.from.id, sessionId);
-  
-  await ctx.answerCbQuery("Pairing dibatalkan.").catch(() => {});
-  await ctx.editMessageText("🛑 <b>PAIRING DIBATALKAN</b>\n───────────────\nProses pairing telah dihentikan dan data dihapus.", { parse_mode: "HTML" }).catch(() => {});
+  try {
+    const sessionId = (ctx.match as RegExpExecArray)[1];
+    await engine.cancelPairing(sessionId);
+    removeBotFromUser(ctx.from.id, sessionId);
+    await ctx.answerCbQuery("Pairing dibatalkan.").catch(() => {});
+    await ctx.editMessageText("🛑 <b>PAIRING DIBATALKAN</b>\n───────────────\nProses pairing telah dihentikan dan data dihapus.", { parse_mode: "HTML" }).catch(() => {});
+  } catch(e) {}
 });
 
 bot.action(/^start_bot_(.+)$/, async (ctx) => {
+  try {
     const sessionId = (ctx.match as RegExpExecArray)[1];
     const b = getUser(ctx.from.id)?.bots?.find((x) => x.id === sessionId);
     if (!b) return ctx.answerCbQuery("Bot tidak ditemukan", { show_alert: true });
@@ -499,153 +499,209 @@ bot.action(/^start_bot_(.+)$/, async (ctx) => {
     pairingMessageTracker[sessionId] = ctx.callbackQuery.message!.message_id;
     await ctx.answerCbQuery("Memulai ulang bot...").catch(() => {});
     await startUserBotSession(ctx, ctx.from.id, b.phoneNumber, sessionId);
+  } catch(e) {}
 });
 
 bot.action(/^detail_bot_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery().catch(() => {});
-  const sessionId = (ctx.match as RegExpExecArray)[1];
-  const b = getUser(ctx.from.id)?.bots?.find((x) => x.id === sessionId);
-  if (!b) return ctx.answerCbQuery("Bot tidak ditemukan", { show_alert: true });
+  try {
+    await ctx.answerCbQuery().catch(() => {});
+    const sessionId = (ctx.match as RegExpExecArray)[1];
+    const b = getUser(ctx.from.id)?.bots?.find((x) => x.id === sessionId);
+    if (!b) return ctx.answerCbQuery("Bot tidak ditemukan", { show_alert: true });
 
-  const isRuntimeConnected = engine.isSessionConnected(b.id);
-  const engineInfo = engine.getSessionPairingInfo(b.id);
+    const isRuntimeConnected = engine.isSessionConnected(b.id);
+    const engineInfo = engine.getSessionPairingInfo(b.id);
 
-  const detailText = `🔍 <b>DETAIL BOT</b>\n───────────────\n📱 Nomor: <code>${b.phoneNumber}</code>\n🔋 Aktif DB: ${b.isActive ? "Ya" : "Tidak"}\n📡 Status Runtime: ${engineInfo?.pairingStatus ?? "Offline"}\n🟢 Connected: ${isRuntimeConnected ? "Ya" : "Tidak"}\n⚠️ Last Error: ${escapeHTML(b.lastError ?? "-")}`;
-  const kbd: any[][] = [];
-  if (!isRuntimeConnected) {
-    kbd.push([Markup.button.callback("▶️ Start / Restart Bot", `start_bot_${sessionId}`)]);
-    kbd.push([Markup.button.callback("🔁 Try Again", `pair_try_${sessionId}`), Markup.button.callback("🛑 Cancel", `pair_cancel_${sessionId}`)]);
-  }
-  kbd.push([Markup.button.callback("🗑 Hapus Bot", `delete_bot_${sessionId}`)]);
-  await ctx.editMessageText(detailText, { parse_mode: "HTML", ...Markup.inlineKeyboard(kbd) }).catch(() => {});
+    const detailText = `🔍 <b>DETAIL BOT</b>\n───────────────\n📱 Nomor: <code>${b.phoneNumber}</code>\n🔋 Aktif DB: ${b.isActive ? "Ya" : "Tidak"}\n📡 Status Runtime: ${engineInfo?.pairingStatus ?? "Offline"}\n🟢 Connected: ${isRuntimeConnected ? "Ya" : "Tidak"}\n⚠️ Last Error: ${escapeHTML(b.lastError ?? "-")}`;
+    const kbd: any[][] = [];
+    if (!isRuntimeConnected) {
+      kbd.push([Markup.button.callback("▶️ Start / Restart Bot", `start_bot_${sessionId}`)]);
+      kbd.push([Markup.button.callback("🔁 Try Again", `pair_try_${sessionId}`), Markup.button.callback("🛑 Cancel", `pair_cancel_${sessionId}`)]);
+    }
+    kbd.push([Markup.button.callback("🗑 Hapus Bot", `delete_bot_${sessionId}`)]);
+    await ctx.editMessageText(detailText, { parse_mode: "HTML", ...Markup.inlineKeyboard(kbd) }).catch(() => {});
+  } catch(e){}
 });
 
 bot.action(/^delete_bot_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery("Menghapus bot...").catch(() => {});
-  const sessionId = (ctx.match as RegExpExecArray)[1];
-  await engine.deleteSession(sessionId).catch(console.error);
-  removeBotFromUser(ctx.from.id, sessionId);
-  await ctx.editMessageText("✅ <b>Bot berhasil dihapus.</b>", { parse_mode: "HTML" }).catch(() => {});
+  try {
+    await ctx.answerCbQuery("Menghapus bot...").catch(() => {});
+    const sessionId = (ctx.match as RegExpExecArray)[1];
+    await engine.deleteSession(sessionId).catch(console.error);
+    removeBotFromUser(ctx.from.id, sessionId);
+    await ctx.editMessageText("✅ <b>Bot berhasil dihapus.</b>", { parse_mode: "HTML" }).catch(() => {});
+  } catch(e){}
 });
 
-/* ===================== CHECK MODE & RESULT ===================== */
+/* ===================== CHECK MODE ===================== */
 
 bot.action("mode_user", async (ctx) => {
-  await ctx.answerCbQuery().catch(() => {});
-  const actives = (getUser(ctx.from.id)?.bots || []).filter((b) => b.isActive && engine.isSessionConnected(b.id));
+  try {
+    await ctx.answerCbQuery().catch(() => {});
+    const actives = (getUser(ctx.from.id)?.bots || []).filter((b) => b.isActive && engine.isSessionConnected(b.id));
 
-  if (actives.length === 0) {
-    await ctx.editMessageText("❌ <b>TIDAK ADA BOT AKTIF</b>\n───────────────\nSilakan tambahkan atau nyalakan bot terlebih dahulu.", { parse_mode: "HTML" }).catch(() => {});
-    return;
-  }
-  if (actives.length === 1) {
-    ctx.session.pendingCheck = { mode: "user", botId: actives[0].id, botPhone: actives[0].phoneNumber };
-    await ctx.editMessageText("📄 <b>KIRIM DAFTAR NOMOR</b>\n───────────────\nKirim nomor yang ingin dicek (pisahkan dengan spasi/enter, maks 500).", {parse_mode: "HTML"}).catch(() => {});
-    return;
-  }
+    if (actives.length === 0) {
+      await ctx.editMessageText("❌ <b>TIDAK ADA BOT AKTIF</b>\n───────────────\nSilakan tambahkan atau nyalakan bot terlebih dahulu.", { parse_mode: "HTML" }).catch(() => {});
+      return;
+    }
+    if (actives.length === 1) {
+      ctx.session.pendingCheck = { mode: "user", botId: actives[0].id, botPhone: actives[0].phoneNumber };
+      await ctx.editMessageText("📄 <b>KIRIM DAFTAR NOMOR</b>\n───────────────\nKirim nomor yang ingin dicek (pisahkan dengan spasi/enter, maks 500).", {parse_mode: "HTML"}).catch(() => {});
+      return;
+    }
 
-  const keyboard: any[][] = [];
-  actives.forEach((b) => keyboard.push([Markup.button.callback(`Pilih ${b.phoneNumber}`, `select_bot_${b.id}`)]));
-  await ctx.editMessageText("📱 <b>PILIH BOT AKTIF</b>\n───────────────", {parse_mode: "HTML", ...Markup.inlineKeyboard(keyboard)}).catch(() => {});
+    const keyboard: any[][] = [];
+    actives.forEach((b) => keyboard.push([Markup.button.callback(`Pilih ${b.phoneNumber}`, `select_bot_${b.id}`)]));
+    await ctx.editMessageText("📱 <b>PILIH BOT AKTIF</b>\n───────────────", {parse_mode: "HTML", ...Markup.inlineKeyboard(keyboard)}).catch(() => {});
+  } catch(e){}
 });
 
 bot.action(/^select_bot_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery().catch(() => {});
-  const sessionId = (ctx.match as RegExpExecArray)[1];
-  const b = getUser(ctx.from.id)?.bots?.find((x) => x.id === sessionId);
-  if (!b || !(b.isActive && engine.isSessionConnected(b.id))) return ctx.answerCbQuery("Bot offline", { show_alert: true });
+  try {
+    await ctx.answerCbQuery().catch(() => {});
+    const sessionId = (ctx.match as RegExpExecArray)[1];
+    const b = getUser(ctx.from.id)?.bots?.find((x) => x.id === sessionId);
+    if (!b || !(b.isActive && engine.isSessionConnected(b.id))) return ctx.answerCbQuery("Bot offline", { show_alert: true });
 
-  ctx.session.pendingCheck = { mode: "user", botId: b.id, botPhone: b.phoneNumber };
-  await ctx.editMessageText("📄 <b>KIRIM DAFTAR NOMOR</b>\n───────────────\nKirim nomor yang ingin dicek (pisahkan dengan spasi/enter, maks 500).", {parse_mode: "HTML"}).catch(() => {});
+    ctx.session.pendingCheck = { mode: "user", botId: b.id, botPhone: b.phoneNumber };
+    await ctx.editMessageText("📄 <b>KIRIM DAFTAR NOMOR</b>\n───────────────\nKirim nomor yang ingin dicek (pisahkan dengan spasi/enter, maks 500).", {parse_mode: "HTML"}).catch(() => {});
+  } catch(e){}
 });
 
 bot.action("mode_global", async (ctx) => {
-  await ctx.answerCbQuery().catch(() => {});
-  if (!globalSessionReady || !engine.isSessionConnected(GLOBAL_SESSION_ID)) {
-    await ctx.editMessageText("❌ Global sender sedang offline.").catch(() => {});
-    return;
-  }
-  ctx.session.pendingCheck = { mode: "global", botId: GLOBAL_SESSION_ID };
-  await ctx.editMessageText("📄 <b>KIRIM DAFTAR NOMOR</b>\n───────────────\nKirim nomor yang ingin dicek (maks 500).", {parse_mode:"HTML"}).catch(() => {});
+  try {
+    await ctx.answerCbQuery().catch(() => {});
+    if (!globalSessionReady || !engine.isSessionConnected(GLOBAL_SESSION_ID)) {
+      await ctx.editMessageText("❌ Global sender sedang offline.").catch(() => {});
+      return;
+    }
+    ctx.session.pendingCheck = { mode: "global", botId: GLOBAL_SESSION_ID };
+    await ctx.editMessageText("📄 <b>KIRIM DAFTAR NOMOR</b>\n───────────────\nKirim nomor yang ingin dicek (maks 500).", {parse_mode:"HTML"}).catch(() => {});
+  } catch(e){}
 });
 
 bot.action(/^history_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery().catch(() => {});
-  const id = (ctx.match as RegExpExecArray)[1];
-  const item = getUserHistory(ctx.from.id, 100).find((x) => x.id === id);
-  if (!item || !item.fullResult) return ctx.answerCbQuery("Riwayat tidak lengkap", { show_alert: true });
-  
-  const txtBuffer = generateTxtReport(item.fullResult, item.id);
-  await ctx.replyWithDocument(
-    { source: txtBuffer, filename: `CekBio_LR${item.id}_${item.totalNumbers}Nomor.txt` },
-    { caption: getSummaryCaption(item), parse_mode: "HTML", ...getSummaryKeyboard(item) }
-  );
+  try {
+    await ctx.answerCbQuery("Memuat laporan...").catch(() => {});
+    const id = (ctx.match as RegExpExecArray)[1];
+    const item = getUserHistory(ctx.from.id, 100).find((x) => x.id === id);
+    if (!item || !item.fullResult) return ctx.answerCbQuery("Riwayat tidak lengkap", { show_alert: true });
+    
+    const txtBuffer = generateTxtReport(item.fullResult, item.id);
+    await ctx.replyWithDocument(
+      { source: txtBuffer, filename: `PNR_Report_${item.id}_${item.totalNumbers}Nomor.txt` },
+      { caption: getSummaryCaption(item), parse_mode: "HTML", ...getSummaryKeyboard(item) }
+    );
+  } catch(e){}
 });
 
-/* ===================== CATEGORY VIEW LOGIC (EDIT CAPTION) ===================== */
+/* ===================== PAGINATION & CATEGORY LOGIC ===================== */
 
-bot.action(/^vcat_(.+?)_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery().catch(() => {});
-  const reportId = (ctx.match as RegExpExecArray)[1];
-  const cat = (ctx.match as RegExpExecArray)[2];
-  const item = getUserHistory(ctx.from.id, 100).find(x => x.id === reportId);
-  if (!item || !item.fullResult) return ctx.answerCbQuery("Report tidak valid.", {show_alert:true});
-  
-  const { filtered, title } = filterCategory(item.fullResult, cat);
+bot.action(/^vcat_([^_]+)_([^_]+)(?:_(\d+))?$/, async (ctx) => {
+  try {
+    const reportId = ctx.match[1];
+    const cat = ctx.match[2];
+    const pageStr = ctx.match[3];
+    
+    const item = getUserHistory(ctx.from.id, 100).find(x => x.id === reportId);
+    
+    if (!item || !item.fullResult) {
+        return ctx.answerCbQuery("Report tidak valid/sudah kadaluarsa.", {show_alert:true}).catch(()=>{});
+    }
+    
+    await ctx.answerCbQuery().catch(() => {});
+    const { filtered, title } = filterCategory(item.fullResult, cat);
 
-  let text = `✅ <b>DAFTAR LENGKAP ${title} (${filtered.length})</b>\n───────────────\n`;
-  text += `Halaman : 1/1\n───────────���───\n`;
-  
-  if (filtered.length === 0) {
-      text += "<i>Tidak ada data.</i>\n───────────────\n";
-  } else {
-      const show = filtered.slice(0, 30);
-      show.forEach((x, i) => { text += `${i + 1}. ${x.phone}\n`; });
-      if (filtered.length > 30) text += `<i>...dan ${filtered.length - 30} lainnya.</i>\n`;
-      text += `───────────────\n`;
+    // PAGINATION LOGIC
+    const itemsPerPage = 10;
+    const totalPages = Math.ceil(filtered.length / itemsPerPage) || 1;
+    const page = Math.min(Math.max(1, parseInt(pageStr) || 1), totalPages);
+
+    const startIdx = (page - 1) * itemsPerPage;
+    const endIdx = page * itemsPerPage;
+    const show = filtered.slice(startIdx, endIdx);
+
+    let text = `✅ <b>DAFTAR LENGKAP ${title} (${filtered.length})</b>\n───────────────\n`;
+    text += `Halaman : ${page}/${totalPages}\n───────────────\n`;
+    
+    if (filtered.length === 0) {
+        text += "<i>Tidak ada data di kategori ini.</i>\n───────────────\n";
+    } else {
+        show.forEach((x, i) => { 
+            text += `${startIdx + i + 1}. <code>${x.phone}</code>\n`; 
+        });
+        text += `───────────────\n`;
+    }
+    text += `👇 <i>Pilih aksi di bawah ini:</i>`;
+
+    // KEYBOARD DYNAMIC
+    const kbd = [];
+    
+    // 1. Navigation Row (Prev / Next)
+    const navRow = [];
+    if (page > 1) {
+        navRow.push(Markup.button.callback("◀️ Prev", `vcat_${reportId}_${cat}_${page - 1}`));
+    }
+    if (page < totalPages) {
+        navRow.push(Markup.button.callback("Next ▶️", `vcat_${reportId}_${cat}_${page + 1}`));
+    }
+    if (navRow.length > 0) kbd.push(navRow);
+
+    // 2. Download Row
+    if (filtered.length > 0) {
+        kbd.push([
+            Markup.button.callback("📄 Download TXT", `dlcat_${reportId}_${cat}_txt`),
+            Markup.button.callback("📊 Download XLSX", `dlcat_${reportId}_${cat}_xlsx`)
+        ]);
+    }
+
+    // 3. Back Row
+    kbd.push([Markup.button.callback("◁ Kembali", `vsum_${reportId}`)]);
+
+    await ctx.editMessageCaption(text, {
+        parse_mode: "HTML",
+        ...Markup.inlineKeyboard(kbd)
+    }).catch((e)=>{ console.log("EditCaption Error:", e.message) });
+  } catch (error) {
+      console.error(error);
   }
-  text += `👇 <i>Pilih format untuk menampilkan data ini.</i>`;
-
-  await ctx.editMessageCaption(text, {
-      parse_mode: "HTML",
-      ...Markup.inlineKeyboard([
-          [Markup.button.callback("📝 Teks", `vcat_${reportId}_${cat}`), Markup.button.callback("📄 TXT", `dlcat_${reportId}_${cat}_txt`), Markup.button.callback("📊 XLSX", `dlcat_${reportId}_${cat}_xlsx`)],
-          [Markup.button.callback("◁ Kembali", `vsum_${reportId}`)]
-      ])
-  }).catch(()=>{});
 });
 
-bot.action(/^vsum_(.+)$/, async (ctx) => {
-  await ctx.answerCbQuery().catch(() => {});
-  const reportId = (ctx.match as RegExpExecArray)[1];
-  const item = getUserHistory(ctx.from.id, 100).find(x => x.id === reportId);
-  if (!item) return;
-  await ctx.editMessageCaption(getSummaryCaption(item), { parse_mode: "HTML", ...getSummaryKeyboard(item) }).catch(()=>{});
+bot.action(/^vsum_([^_]+)$/, async (ctx) => {
+  try {
+    await ctx.answerCbQuery().catch(() => {});
+    const reportId = ctx.match[1];
+    const item = getUserHistory(ctx.from.id, 100).find(x => x.id === reportId);
+    if (!item) return;
+    await ctx.editMessageCaption(getSummaryCaption(item), { parse_mode: "HTML", ...getSummaryKeyboard(item) }).catch(()=>{});
+  } catch(e){}
 });
 
-bot.action(/^dlcat_(.+?)_(.+?)_(.+)$/, async (ctx) => {
-  const reportId = (ctx.match as RegExpExecArray)[1];
-  const cat = (ctx.match as RegExpExecArray)[2];
-  const format = (ctx.match as RegExpExecArray)[3];
-  
-  const item = getUserHistory(ctx.from.id, 100).find(x => x.id === reportId);
-  if (!item || !item.fullResult) return ctx.answerCbQuery("Report tidak valid.", {show_alert:true});
-  
-  const { filtered, title } = filterCategory(item.fullResult, cat);
-  if (filtered.length === 0) return ctx.answerCbQuery("Tidak ada data untuk diunduh.", {show_alert:true});
-  
-  await ctx.answerCbQuery(`Menyiapkan ${format.toUpperCase()}...`).catch(() => {});
-  const nums = filtered.map(x => x.phone);
-  
-  if (format === "txt") {
-      const content = `DAFTAR LENGKAP ${title}\nTotal: ${nums.length}\n\n${nums.join("\n")}`;
-      await ctx.replyWithDocument({ source: Buffer.from(content, "utf-8"), filename: `${title.replace(/ /g, "_")}_${reportId}.txt` });
-  } else if (format === "xlsx") {
-      const buffer = await createExcelBuffer(nums, title);
-      await ctx.replyWithDocument({ source: buffer, filename: `${title.replace(/ /g, "_")}_${reportId}.xlsx` });
-  }
+bot.action(/^dlcat_([^_]+)_(.+?)_(.+)$/, async (ctx) => {
+  try {
+    const reportId = ctx.match[1];
+    const cat = ctx.match[2];
+    const format = ctx.match[3];
+    
+    const item = getUserHistory(ctx.from.id, 100).find(x => x.id === reportId);
+    if (!item || !item.fullResult) return ctx.answerCbQuery("Report tidak valid.", {show_alert:true});
+    
+    const { filtered, title } = filterCategory(item.fullResult, cat);
+    if (filtered.length === 0) return ctx.answerCbQuery("Tidak ada data untuk diunduh.", {show_alert:true});
+    
+    await ctx.answerCbQuery(`Menyiapkan ${format.toUpperCase()}...`).catch(() => {});
+    const nums = filtered.map(x => x.phone);
+    const safeTitle = title.replace(/[^a-zA-Z0-9]/g, "_");
+    
+    if (format === "txt") {
+        const content = `DAFTAR LENGKAP ${title}\nTotal: ${nums.length}\n\n${nums.join("\n")}`;
+        await ctx.replyWithDocument({ source: Buffer.from(content, "utf-8"), filename: `PNR_Detail_${safeTitle}_${reportId}.txt` });
+    } else if (format === "xlsx") {
+        const buffer = await createExcelBuffer(nums, title);
+        await ctx.replyWithDocument({ source: buffer, filename: `PNR_Detail_${safeTitle}_${reportId}.xlsx` });
+    }
+  } catch(e){}
 });
-
 
 /* ===================== MESSAGE HANDLER (TEXT INPUT) ===================== */
 
@@ -693,7 +749,9 @@ bot.on(message("text"), async (ctx) => {
       const start = Date.now();
       const result = await engine.checkNumbers(pending.botId, numbers, { batchSize: 5, concurrencyPerBatch: 3, minBatchDelayMs: 500, maxBatchDelayMs: 1500, perNumberTimeoutMs: 8000 });
       const durationMs = Date.now() - start;
-      const reportId = `CB${Date.now().toString().slice(-6)}`; 
+      
+      const uniqueNum = Math.floor(Math.random() * 9000) + 1000;
+      const reportId = `PNR${Date.now().toString().slice(-4)}${uniqueNum}`;
 
       const item: CheckHistoryItem = { id: reportId, userId, mode: pending.mode, botPhone: pending.botPhone, timestamp: new Date().toISOString(), totalNumbers: result.total_checked, durationMs, fullResult: result };
       addHistoryItem(item);
@@ -702,11 +760,11 @@ bot.on(message("text"), async (ctx) => {
 
       const txtBuffer = generateTxtReport(result, reportId);
       await ctx.replyWithDocument(
-        { source: txtBuffer, filename: `CekBio_LR${Date.now().toString().slice(-8)}_${result.total_checked}Nomor.txt` },
+        { source: txtBuffer, filename: `PNR_Report_${reportId}_${result.total_checked}Nomor.txt` },
         {
           caption: getSummaryCaption(item),
           parse_mode: "HTML",
-          message_effect_id: "5046509860389126442", // Confetti Effect
+          message_effect_id: "5046509860389126442", 
           ...getSummaryKeyboard(item)
         } as any
       );
@@ -720,7 +778,7 @@ bot.on(message("text"), async (ctx) => {
 /* ===================== START ===================== */
 
 async function main() {
-  await initAllUserSessions(); // Menghubungkan ulang bot yg tersimpan
+  await initAllUserSessions(); 
   await bot.launch();
   console.log("🤖 Panorama Bot running...");
   process.once("SIGINT", () => bot.stop("SIGINT"));
