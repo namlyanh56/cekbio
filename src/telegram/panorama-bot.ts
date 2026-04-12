@@ -13,6 +13,14 @@ import {
   sanitizePhone
 } from "../engine/whatsapp-bulk-checker";
 
+/* ===================== ANTI CRASH SYSTEM ===================== */
+process.on("uncaughtException", (err) => {
+  console.error("🚨 [ANTI-CRASH] Uncaught Exception Terdeteksi:", err.message);
+});
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("🚨 [ANTI-CRASH] Unhandled Rejection Terdeteksi pada:", promise, "alasan:", reason);
+});
+
 /* ===================== TYPES ===================== */
 
 interface PanoramaBot {
@@ -145,7 +153,6 @@ function getUserHistory(userId: number, limit = 10): CheckHistoryItem[] {
 
 /* ===================== UTILS & EXPORT ===================== */
 
-// Menerima raw text dan mengubahnya menjadi array format internasional
 function parseNumbersFromText(text: string): string[] {
   return text
     .split(/[\n,]+/)
@@ -738,7 +745,6 @@ async function handleCheckNumbers(ctx: BotContext, textContent: string) {
 
 /* ===================== MESSAGE HANDLERS ===================== */
 
-// Handle dokumen (.txt)
 bot.on(message("document"), async (ctx) => {
   if (!ctx.session.pendingCheck) return;
 
@@ -759,7 +765,6 @@ bot.on(message("document"), async (ctx) => {
   }
 });
 
-// Handle input teks
 bot.on(message("text"), async (ctx) => {
   const userId = ctx.from.id;
   const text = ctx.message.text.trim();
