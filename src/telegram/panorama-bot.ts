@@ -424,7 +424,7 @@ bot.hears("⚙️ Navigator Admin", async (ctx) => {
   ctx.session.adminAction = undefined; 
   
   const config = loadConfig();
-  const text = `⚙️ <b>NAVIGATOR ADMIN</b>\n──────────────���\nSelamat datang di Panel Admin. Pilih menu kendali sistem di bawah ini:\n\n🛠 <b>Status Maintenance:</b> ${config.maintenanceMode ? "🔴 AKTIF (User Terblokir)" : "🟢 NONAKTIF (Normal)"}\n🌍 <b>Sender Global:</b> ${config.globalSenderPhone ? `<code>${config.globalSenderPhone}</code>` : "Belum Diatur"}`;
+  const text = `⚙️ <b>NAVIGATOR ADMIN</b>\n───────────────\nSelamat datang di Panel Admin. Pilih menu kendali sistem di bawah ini:\n\n🛠 <b>Status Maintenance:</b> ${config.maintenanceMode ? "🔴 AKTIF (User Terblokir)" : "🟢 NONAKTIF (Normal)"}\n🌍 <b>Sender Global:</b> ${config.globalSenderPhone ? `<code>${config.globalSenderPhone}</code>` : "Belum Diatur"}`;
   
   const kbd = Markup.inlineKeyboard([
     [Markup.button.callback("👥 Manajemen Pengguna", "admin_users"), Markup.button.callback("🌍 Sender Global", "admin_global")],
@@ -958,24 +958,26 @@ bot.action(/^dlcat_([^_]+)_(.+?)_(.+)$/, async (ctx) => {
   } catch(e){}
 });
 
-/* ===================== LOGIC SMART MERGE CEK BIO ===================== */
+/* ===================== LOGIC SMART MERGE & BACKGROUND CHECK ===================== */
 
-const userPayloadBuffer: Record<number, { timer: NodeJS.Timeout, numbers: string[], pending: PendingCheck, ctx: BotContext }> = {};
+const userPayloadBuffer: Record<number, { timer: NodeJS.Timeout, numbers: string[], pending: PendingCheck, chatId: number }> = {};
 
 function handleUserInputNumbers(ctx: BotContext, numbers: string[], pending: PendingCheck) {
     const userId = ctx.from!.id;
+    const chatId = ctx.chat!.id;
+    
     if (!userPayloadBuffer[userId]) {
-        ctx.reply("⏳ Menerima nomor... (Bot akan memulai proses dalam 3 detik. Silakan kirim pesan nomor lagi jika ada tambahan)").catch(()=>{});
+        ctx.reply("⏳ <i>Menampung nomor... (Menyatukan data dalam 3 detik, kirim lagi jika ada file tambahan)</i>", {parse_mode: "HTML"}).catch(()=>{});
         userPayloadBuffer[userId] = {
             timer: setTimeout(() => executeMergedNumbers(userId), 3000),
             numbers: [...numbers],
             pending: pending,
-            ctx: ctx
+            chatId: chatId
         };
     } else {
         clearTimeout(userPayloadBuffer[userId].timer);
         userPayloadBuffer[userId].numbers.push(...numbers);
-        userPayloadBuffer[userId].ctx = ctx; 
+        userPayloadBuffer[userId].chatId = chatId; 
         userPayloadBuffer[userId].timer = setTimeout(() => executeMergedNumbers(userId), 3000);
     }
 }
@@ -985,24 +987,24 @@ async function executeMergedNumbers(userId: number) {
     delete userPayloadBuffer[userId];
     if (!payload) return;
 
-    const { numbers, pending, ctx } = payload;
+    const { numbers, pending, chatId } = payload;
     const uniqueNumbers = [...new Set(numbers)];
-    ctx.session.pendingCheck = undefined;
-
-    // Jalankan eksekusi ke background agar tidak memicu Timeout Telegraf
-    runCheckNumbersBackground(ctx, uniqueNumbers, pending).catch(console.error);
+    
+    const progress = await bot.telegram.sendMessage(chatId, "⏳ <b>PROSES CEK BIO SEDANG BERJALAN!</b>\n───────────────\nMohon tunggu, sistem sedang mengeksekusi di belakang layar tanpa mengganggu bot utama...", {parse_mode:"HTML"});
+    
+    // FIRE AND FORGET - Eksekusi dipindahkan sepenuhnya ke latar belakang. 
+    // Ini mengakhiri rantai middleware sehingga Telegraf TIDAK AKAN Timeout > 90 detik.
+    runCheckNumbersBackground(userId, chatId, progress.message_id, uniqueNumbers, pending).catch(console.error);
 }
 
-// Background Function untuk Cek Nomor
-async function runCheckNumbersBackground(ctx: BotContext, numbers: string[], pending: PendingCheck) {
+// Pekerja di Balik Layar (Sama sekali tidak terkait dengan Timeout Telegram)
+async function runCheckNumbersBackground(userId: number, chatId: number, progressMsgId: number, numbers: string[], pending: PendingCheck) {
   const max = 500;
   if (numbers.length > max) {
-      await ctx.reply(`⚠️ Ditemukan ${numbers.length} nomor. Maksimal ${max} nomor dalam sekali cek. Hanya memproses ${max} nomor pertama.`).catch(()=>{});
+      await bot.telegram.sendMessage(chatId, `⚠️ Ditemukan ${numbers.length} nomor. Maksimal ${max} nomor dalam sekali cek. Hanya memproses ${max} nomor pertama.`).catch(()=>{});
       numbers = numbers.slice(0, max);
   }
 
-  const progress = await ctx.reply("⏳ <b>PROSES CEK BIO SEDANG BERJALAN!</b>\n───────────────\nMohon tunggu, sistem sedang memeriksa daftar nomor secara detail dan akurat...", {parse_mode:"HTML"});
-  
   try {
     const start = Date.now();
     const result = await engine.checkNumbers(pending.botId, numbers, { batchSize: 5, concurrencyPerBatch: 3, minBatchDelayMs: 500, maxBatchDelayMs: 1500, perNumberTimeoutMs: 8000 });
@@ -1011,23 +1013,23 @@ async function runCheckNumbersBackground(ctx: BotContext, numbers: string[], pen
     const uniqueNum = Math.floor(Math.random() * 9000) + 1000;
     const reportId = `PNR${Date.now().toString().slice(-4)}${uniqueNum}`;
 
-    const item: CheckHistoryItem = { id: reportId, userId: ctx.from!.id, mode: pending.mode, botPhone: pending.botPhone, timestamp: new Date().toISOString(), totalNumbers: result.total_checked, durationMs, fullResult: result };
+    const item: CheckHistoryItem = { id: reportId, userId: userId, mode: pending.mode, botPhone: pending.botPhone, timestamp: new Date().toISOString(), totalNumbers: result.total_checked, durationMs, fullResult: result };
     addHistoryItem(item);
 
-    await ctx.telegram.editMessageText(ctx.chat!.id, progress.message_id, undefined, `✅ <b>PROSES CEK BIO SELESAI!</b>\n───────────────\nLaporan hasil cek bio telah berhasil disusun. Anda dapat mengunduh dokumen laporan di pesan berikutnya.`, {parse_mode:"HTML"}).catch(()=>{});
+    await bot.telegram.editMessageText(chatId, progressMsgId, undefined, `✅ <b>PROSES CEK BIO SELESAI!</b>\n───────────���───\nLaporan hasil cek bio telah berhasil disusun. Anda dapat mengunduh dokumen laporan di pesan berikutnya.`, {parse_mode:"HTML"}).catch(()=>{});
 
     const txtBuffer = generateTxtReport(result, reportId);
-    await ctx.replyWithDocument(
+    await bot.telegram.sendDocument(chatId, 
       { source: txtBuffer, filename: `PNR_Report_${reportId}_${result.total_checked}Nomor.txt` },
       {
         caption: getSummaryCaption(item),
         parse_mode: "HTML",
         ...getSummaryKeyboard(item)
       } as any
-    );
+    ).catch(console.error);
 
   } catch (e: unknown) {
-    await ctx.telegram.editMessageText(ctx.chat!.id, progress.message_id, undefined, `❌ Error: ${e instanceof Error ? e.message : "Unknown error"}`).catch(()=>{});
+    await bot.telegram.editMessageText(chatId, progressMsgId, undefined, `❌ Error Eksekusi: ${e instanceof Error ? e.message : "Unknown error"}`).catch(()=>{});
   }
 }
 
@@ -1038,7 +1040,8 @@ bot.on(message("document"), async (ctx) => {
 
   const doc = ctx.message.document;
   if (doc.mime_type !== "text/plain" && !doc.file_name?.endsWith(".txt")) {
-    return ctx.reply("❌ Silakan kirim file dengan format .txt");
+    ctx.reply("❌ Silakan kirim file dengan format .txt").catch(()=>{});
+    return;
   }
 
   const waitMsg = await ctx.reply("⏳ Membaca file dokumen...");
@@ -1051,6 +1054,8 @@ bot.on(message("document"), async (ctx) => {
     const numbers = parseNumbersFromText(fileContent);
     if (numbers.length > 0) {
         handleUserInputNumbers(ctx, numbers, ctx.session.pendingCheck);
+        // Hapus `pendingCheck` HANYA JIKA proses merging SUDAH berjalan di dalam handleUserInputNumbers,
+        // namun untuk Smart Merge, kita pertahankan session sejenak agar user bisa mengirim file ke-2.
     } else {
         ctx.reply("❌ Tidak ada nomor valid di dokumen.").catch(()=>{});
     }
@@ -1090,51 +1095,67 @@ bot.on(message("text"), async (ctx) => {
         success++;
       } catch (e) { failed++; }
     }
-    return ctx.telegram.editMessageText(ctx.chat.id, broadcastMsg.message_id, undefined, `✅ <b>Broadcast Selesai</b>\nBerhasil: ${success}\nGagal: ${failed}`, {parse_mode: "HTML"});
+    ctx.telegram.editMessageText(ctx.chat.id, broadcastMsg.message_id, undefined, `✅ <b>Broadcast Selesai</b>\nBerhasil: ${success}\nGagal: ${failed}`, {parse_mode: "HTML"}).catch(()=>{});
+    return;
   }
 
   // STATE: ADMIN CHANGE BACKGROUND VIA URL
   if (ctx.session.adminAction === "bg" && ADMIN_IDS.includes(userId)) {
     ctx.session.adminAction = undefined;
-    if (!text.startsWith("http")) return ctx.reply("❌ Format URL tidak valid. Harap kirim Link URL atau langsung Upload Foto dari Galeri Anda.");
+    if (!text.startsWith("http")) {
+       ctx.reply("❌ Format URL tidak valid. Harap kirim Link URL atau langsung Upload Foto dari Galeri Anda.").catch(()=>{});
+       return;
+    }
     const config = loadConfig();
     config.bgImage = text;
     saveConfig(config);
-    return ctx.reply("✅ Background berhasil diubah menggunakan URL!");
+    ctx.reply("✅ Background berhasil diubah menggunakan URL!").catch(()=>{});
+    return;
   }
 
   // STATE: ADMIN BAN USER
   if (ctx.session.adminAction === "ban" && ADMIN_IDS.includes(userId)) {
     ctx.session.adminAction = undefined;
     const targetId = parseInt(text, 10);
-    if (isNaN(targetId)) return ctx.reply("❌ ID User tidak valid.");
+    if (isNaN(targetId)) {
+        ctx.reply("❌ ID User tidak valid.").catch(()=>{});
+        return;
+    }
     const config = loadConfig();
     if (!config.bannedUsers.includes(targetId)) {
       config.bannedUsers.push(targetId);
       saveConfig(config);
     }
-    return ctx.reply(`✅ User ID <code>${targetId}</code> berhasil di-Banned.`, {parse_mode: "HTML"});
+    ctx.reply(`✅ User ID <code>${targetId}</code> berhasil di-Banned.`, {parse_mode: "HTML"}).catch(()=>{});
+    return;
   }
 
   // STATE: ADMIN UNBAN USER
   if (ctx.session.adminAction === "unban" && ADMIN_IDS.includes(userId)) {
     ctx.session.adminAction = undefined;
     const targetId = parseInt(text, 10);
-    if (isNaN(targetId)) return ctx.reply("❌ ID User tidak valid.");
+    if (isNaN(targetId)) {
+        ctx.reply("❌ ID User tidak valid.").catch(()=>{});
+        return;
+    }
     const config = loadConfig();
     config.bannedUsers = config.bannedUsers.filter(id => id !== targetId);
     saveConfig(config);
-    return ctx.reply(`✅ Akses User ID <code>${targetId}</code> berhasil dipulihkan.`, {parse_mode: "HTML"});
+    ctx.reply(`✅ Akses User ID <code>${targetId}</code> berhasil dipulihkan.`, {parse_mode: "HTML"}).catch(()=>{});
+    return;
   }
 
   // STATE: ADMIN PAIR GLOBAL SENDER
   if (ctx.session.adminAction === "global_pair" && ADMIN_IDS.includes(userId)) {
     ctx.session.adminAction = undefined;
     const phone = sanitizePhone(text);
-    if (!/^\d{8,16}$/.test(phone)) return ctx.reply("❌ Format nomor salah.");
+    if (!/^\d{8,16}$/.test(phone)) {
+        ctx.reply("❌ Format nomor salah.").catch(()=>{});
+        return;
+    }
     const msg = await ctx.reply("⏳ Menghubungkan Global Sender...");
     pairingMessageTracker[GLOBAL_SESSION_ID] = msg.message_id;
-    await startGlobalBotSession(ctx, phone);
+    startGlobalBotSession(ctx, phone).catch(console.error); // Fire & forget
     return;
   }
 
@@ -1142,14 +1163,24 @@ bot.on(message("text"), async (ctx) => {
   if (ctx.session.waitingForBotNumber) {
     ctx.session.waitingForBotNumber = false;
     const phone = sanitizePhone(text);
-    if (!/^\d{8,16}$/.test(phone)) return ctx.reply("❌ Format nomor salah.");
+    if (!/^\d{8,16}$/.test(phone)) {
+        ctx.reply("❌ Format nomor salah.").catch(()=>{});
+        return;
+    }
 
     const existing = getUser(userId)?.bots?.find((b) => b.phoneNumber === phone);
     if (existing) {
         const isConnected = engine.isSessionConnected(existing.id);
-        if (existing.isActive && isConnected) return ctx.reply("❌ Nomor sudah terdaftar & aktif.");
-        if (existing.isActive && !isConnected) return ctx.reply(`⚠️ Nomor terdaftar tapi offline.\nSilakan jalankan ulang bot.`, Markup.inlineKeyboard([[Markup.button.callback("▶️ Start / Restart Bot", `start_bot_${existing.id}`)]]));
-        return ctx.reply(`⚠️ Nomor sudah ada tapi belum terhubung.`, Markup.inlineKeyboard([[Markup.button.callback("🔁 Try Again", `pair_try_${existing.id}`)],[Markup.button.callback("🛑 Cancel", `pair_cancel_${existing.id}`)]]));
+        if (existing.isActive && isConnected) {
+            ctx.reply("❌ Nomor sudah terdaftar & aktif.").catch(()=>{});
+            return;
+        }
+        if (existing.isActive && !isConnected) {
+            ctx.reply(`⚠️ Nomor terdaftar tapi offline.\nSilakan jalankan ulang bot.`, Markup.inlineKeyboard([[Markup.button.callback("▶️ Start / Restart Bot", `start_bot_${existing.id}`)]])).catch(()=>{});
+            return;
+        }
+        ctx.reply(`⚠️ Nomor sudah ada tapi belum terhubung.`, Markup.inlineKeyboard([[Markup.button.callback("🔁 Try Again", `pair_try_${existing.id}`)],[Markup.button.callback("🛑 Cancel", `pair_cancel_${existing.id}`)]])).catch(()=>{});
+        return;
     }
 
     const sessionId = `user_${userId}_${phone}`;
@@ -1157,7 +1188,7 @@ bot.on(message("text"), async (ctx) => {
 
     const msg = await ctx.reply("⏳ Menghubungkan ke server WhatsApp...");
     pairingMessageTracker[sessionId] = msg.message_id;
-    await startUserBotSession(ctx, userId, phone, sessionId);
+    startUserBotSession(ctx, userId, phone, sessionId).catch(console.error); // Fire & forget
     return;
   }
 
