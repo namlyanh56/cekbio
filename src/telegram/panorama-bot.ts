@@ -97,15 +97,19 @@ const HISTORY_FILE = path.join(DATA_DIR, "history.json");
 const CONFIG_FILE = path.join(DATA_DIR, "config.json");
 
 function loadConfig(): SystemConfig {
-  if (!fs.existsSync(CONFIG_FILE)) {
-    return {
-      bgImage: "https://placehold.co/800x400/1a1a1a/ff3333.png?text=LANGRIS+CEK+BIO+BOT",
-      maintenanceMode: false,
-      bannedUsers: [],
-      globalSenderPhone: null
-    };
+  const defaultCfg: SystemConfig = {
+    bgImage: "https://placehold.co/800x400/1a1a1a/ff3333.png?text=LANGRIS+CEK+BIO+BOT",
+    maintenanceMode: false,
+    bannedUsers: [],
+    globalSenderPhone: null
+  };
+  if (!fs.existsSync(CONFIG_FILE)) return defaultCfg;
+  try {
+    return JSON.parse(fs.readFileSync(CONFIG_FILE, "utf-8"));
+  } catch (e) {
+    console.error("Config JSON corrupt, menggunakan default.");
+    return defaultCfg;
   }
-  return JSON.parse(fs.readFileSync(CONFIG_FILE, "utf-8"));
 }
 
 function saveConfig(cfg: SystemConfig) {
@@ -114,10 +118,12 @@ function saveConfig(cfg: SystemConfig) {
 
 function loadUsers(): Map<number, PanoramaUser> {
   if (!fs.existsSync(USERS_FILE)) return new Map();
-  const raw = JSON.parse(fs.readFileSync(USERS_FILE, "utf-8")) as Record<string, PanoramaUser>;
-  const map = new Map<number, PanoramaUser>();
-  for (const [k, v] of Object.entries(raw)) map.set(Number(k), v);
-  return map;
+  try {
+    const raw = JSON.parse(fs.readFileSync(USERS_FILE, "utf-8")) as Record<string, PanoramaUser>;
+    const map = new Map<number, PanoramaUser>();
+    for (const [k, v] of Object.entries(raw)) map.set(Number(k), v);
+    return map;
+  } catch (e) { return new Map(); }
 }
 
 function saveUsers(users: Map<number, PanoramaUser>) {
@@ -155,7 +161,7 @@ function removeBotFromUser(userId: number, botId: string) {
 
 function loadHistory(): CheckHistoryItem[] {
   if (!fs.existsSync(HISTORY_FILE)) return [];
-  return JSON.parse(fs.readFileSync(HISTORY_FILE, "utf-8")) as CheckHistoryItem[];
+  try { return JSON.parse(fs.readFileSync(HISTORY_FILE, "utf-8")) as CheckHistoryItem[]; } catch (e) { return []; }
 }
 
 function saveHistory(history: CheckHistoryItem[]) {
@@ -199,6 +205,30 @@ async function createExcelBuffer(numbers: string[], title: string): Promise<Buff
   numbers.forEach((n, i) => sheet.addRow({ no: i + 1, phone: n }));
   const data = await workbook.xlsx.writeBuffer();
   return Buffer.isBuffer(data) ? data : Buffer.from(data);
+}
+
+/* ===================== ANTI-CRASH UI WRAPPERS ===================== */
+
+// Pembungkus ini memastikan jika URL gambar mati/error, bot tetap akan mengirim text dan tidak hang.
+async function safeReplyWithPhoto(ctx: BotContext, caption: string, keyboard: any = {}) {
+  const config = loadConfig();
+  try {
+    return await ctx.replyWithPhoto(config.bgImage, { caption, parse_mode: "HTML", ...keyboard });
+  } catch (e) {
+    console.error("[Anti-Crash] Gagal mengirim foto latar. Fallback menggunakan pesan teks.");
+    return await ctx.reply(caption, { parse_mode: "HTML", ...keyboard });
+  }
+}
+
+// Jika sebelumnya message adalah text (karena fallback), edit caption akan gagal. Fungsi ini mencegah hal itu.
+async function safeEditCaption(ctx: BotContext, caption: string, keyboard: any = {}) {
+  try {
+    return await ctx.editMessageCaption(caption, { parse_mode: "HTML", ...keyboard });
+  } catch (e) {
+    try {
+      return await ctx.editMessageText(caption, { parse_mode: "HTML", ...keyboard });
+    } catch (err) {}
+  }
 }
 
 /* ===================== UI FORMATTER ===================== */
@@ -356,16 +386,12 @@ function filterCategory(summary: CheckSummary, cat: string) {
 const bot = new Telegraf<BotContext>(BOT_TOKEN);
 bot.use(session({ defaultSession: (): SessionData => ({}) }));
 
-// Middleware Akses Kontrol & Maintenance
 bot.use(async (ctx, next) => {
   if (!ctx.from) return next();
   const config = loadConfig();
   const isAdmin = ADMIN_IDS.includes(ctx.from.id);
 
-  if (config.bannedUsers.includes(ctx.from.id) && !isAdmin) {
-    // User di-banned, bot diam
-    return;
-  }
+  if (config.bannedUsers.includes(ctx.from.id) && !isAdmin) return;
 
   if (config.maintenanceMode && !isAdmin) {
     if (ctx.message && 'text' in ctx.message && ctx.message.text === '/start') {
@@ -373,7 +399,6 @@ bot.use(async (ctx, next) => {
     }
     return;
   }
-
   return next();
 });
 
@@ -384,17 +409,7 @@ bot.start(async (ctx) => {
     user = { userId, username: ctx.from.username, firstName: ctx.from.first_name, tier: "free", createdAt: new Date().toISOString(), bots: [], lastMode: null };
     saveUser(user);
   }
-  
-  const config = loadConfig();
-  await ctx.replyWithPhoto(
-    { url: config.bgImage },
-    {
-      caption: generateMainMenuHTML(user),
-      parse_mode: "HTML",
-      message_effect_id: "5104841245755180586", 
-      ...getReplyKeyboard(userId)
-    } as any
-  );
+  await safeReplyWithPhoto(ctx, generateMainMenuHTML(user), getReplyKeyboard(userId));
 });
 
 bot.action("back_main", async (ctx) => {
@@ -402,8 +417,7 @@ bot.action("back_main", async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
     const user = getUser(ctx.from.id);
     if(!user) return;
-    const config = loadConfig();
-    await ctx.editMessageCaption(generateMainMenuHTML(user), { parse_mode: "HTML" }).catch(() => {});
+    await safeEditCaption(ctx, generateMainMenuHTML(user));
   } catch(e) {}
 });
 
@@ -411,7 +425,7 @@ bot.action("back_main", async (ctx) => {
 
 bot.hears("⚙️ Navigator Admin", async (ctx) => {
   if (!ADMIN_IDS.includes(ctx.from.id)) return;
-  ctx.session.adminAction = undefined; // reset state
+  ctx.session.adminAction = undefined; 
   
   const config = loadConfig();
   const text = `⚙️ <b>NAVIGATOR ADMIN</b>\n───────────────\nSelamat datang di Panel Admin. Pilih menu kendali sistem di bawah ini:\n\n🛠 <b>Status Maintenance:</b> ${config.maintenanceMode ? "🔴 AKTIF (User Terblokir)" : "🟢 NONAKTIF (Normal)"}\n🌍 <b>Sender Global:</b> ${config.globalSenderPhone ? `<code>${config.globalSenderPhone}</code>` : "Belum Diatur"}`;
@@ -422,7 +436,7 @@ bot.hears("⚙️ Navigator Admin", async (ctx) => {
     [Markup.button.callback("📊 Statistik Sistem", "admin_stats"), Markup.button.callback("📢 Broadcast Pesan", "admin_broadcast")]
   ]);
   
-  await ctx.replyWithPhoto({url: config.bgImage}, {caption: text, parse_mode: "HTML", ...kbd});
+  await safeReplyWithPhoto(ctx, text, kbd);
 });
 
 bot.action("admin_back", async (ctx) => {
@@ -436,7 +450,7 @@ bot.action("admin_back", async (ctx) => {
     [Markup.button.callback("🛠 Toggle Maintenance", "admin_maintenance"), Markup.button.callback("🖼 Ganti Background", "admin_bg")],
     [Markup.button.callback("📊 Statistik Sistem", "admin_stats"), Markup.button.callback("📢 Broadcast Pesan", "admin_broadcast")]
   ]);
-  await ctx.editMessageCaption(text, {parse_mode: "HTML", ...kbd}).catch(()=>{});
+  await safeEditCaption(ctx, text, kbd);
 });
 
 bot.action("admin_users", async (ctx) => {
@@ -447,19 +461,19 @@ bot.action("admin_users", async (ctx) => {
     [Markup.button.callback("🚫 Banned User", "admin_act_ban"), Markup.button.callback("✅ Unban User", "admin_act_unban")],
     [Markup.button.callback("◁ Kembali", "admin_back")]
   ]);
-  await ctx.editMessageCaption(text, {parse_mode: "HTML", ...kbd}).catch(()=>{});
+  await safeEditCaption(ctx, text, kbd);
 });
 
 bot.action("admin_act_ban", async (ctx) => {
   if (!ADMIN_IDS.includes(ctx.from.id)) return;
   ctx.session.adminAction = "ban";
-  await ctx.editMessageCaption("🚫 <b>BANNED USER</b>\nKirimkan <b>User ID Telegram</b> yang ingin Anda blokir dari sistem:", {parse_mode: "HTML", ...Markup.inlineKeyboard([[Markup.button.callback("◁ Batal", "admin_users")]])}).catch(()=>{});
+  await safeEditCaption(ctx, "🚫 <b>BANNED USER</b>\nKirimkan <b>User ID Telegram</b> yang ingin Anda blokir dari sistem:", Markup.inlineKeyboard([[Markup.button.callback("◁ Batal", "admin_users")]]));
 });
 
 bot.action("admin_act_unban", async (ctx) => {
   if (!ADMIN_IDS.includes(ctx.from.id)) return;
   ctx.session.adminAction = "unban";
-  await ctx.editMessageCaption("✅ <b>UNBAN USER</b>\nKirimkan <b>User ID Telegram</b> yang ingin Anda pulihkan aksesnya:", {parse_mode: "HTML", ...Markup.inlineKeyboard([[Markup.button.callback("◁ Batal", "admin_users")]])}).catch(()=>{});
+  await safeEditCaption(ctx, "✅ <b>UNBAN USER</b>\nKirimkan <b>User ID Telegram</b> yang ingin Anda pulihkan aksesnya:", Markup.inlineKeyboard([[Markup.button.callback("◁ Batal", "admin_users")]]));
 });
 
 bot.action("admin_maintenance", async (ctx) => {
@@ -469,26 +483,25 @@ bot.action("admin_maintenance", async (ctx) => {
   saveConfig(config);
   await ctx.answerCbQuery(`Maintenance Mode: ${config.maintenanceMode ? "AKTIF" : "NONAKTIF"}`).catch(()=>{});
   
-  // Refresh Menu
   const text = `⚙️ <b>NAVIGATOR ADMIN</b>\n───────────────\nSelamat datang di Panel Admin. Pilih menu kendali sistem di bawah ini:\n\n🛠 <b>Status Maintenance:</b> ${config.maintenanceMode ? "🔴 AKTIF (User Terblokir)" : "🟢 NONAKTIF (Normal)"}\n🌍 <b>Sender Global:</b> ${config.globalSenderPhone ? `<code>${config.globalSenderPhone}</code>` : "Belum Diatur"}`;
   const kbd = Markup.inlineKeyboard([
     [Markup.button.callback("👥 Manajemen Pengguna", "admin_users"), Markup.button.callback("🌍 Sender Global", "admin_global")],
     [Markup.button.callback("🛠 Toggle Maintenance", "admin_maintenance"), Markup.button.callback("🖼 Ganti Background", "admin_bg")],
     [Markup.button.callback("📊 Statistik Sistem", "admin_stats"), Markup.button.callback("📢 Broadcast Pesan", "admin_broadcast")]
   ]);
-  await ctx.editMessageCaption(text, {parse_mode: "HTML", ...kbd}).catch(()=>{});
+  await safeEditCaption(ctx, text, kbd);
 });
 
 bot.action("admin_bg", async (ctx) => {
   if (!ADMIN_IDS.includes(ctx.from.id)) return;
   ctx.session.adminAction = "bg";
-  await ctx.editMessageCaption("🖼 <b>GANTI BACKGROUND BOT</b>\nSilakan kirimkan <b>URL Gambar/Foto</b> (http/https format .png/.jpg) yang ingin dijadikan latar belakang utama bot:", {parse_mode: "HTML", ...Markup.inlineKeyboard([[Markup.button.callback("◁ Batal", "admin_back")]])}).catch(()=>{});
+  await safeEditCaption(ctx, "🖼 <b>GANTI BACKGROUND BOT</b>\nSilakan kirimkan <b>URL Gambar</b> (http/https) ATAU langsung <b>Upload Foto dari Galeri</b> Anda ke sini:", Markup.inlineKeyboard([[Markup.button.callback("◁ Batal", "admin_back")]]));
 });
 
 bot.action("admin_broadcast", async (ctx) => {
   if (!ADMIN_IDS.includes(ctx.from.id)) return;
   ctx.session.adminAction = "broadcast";
-  await ctx.editMessageCaption("📢 <b>BROADCAST PESAN</b>\nSilakan kirimkan pesan yang ingin Anda siarkan ke <b>seluruh pengguna</b> bot:", {parse_mode: "HTML", ...Markup.inlineKeyboard([[Markup.button.callback("◁ Batal", "admin_back")]])}).catch(()=>{});
+  await safeEditCaption(ctx, "📢 <b>BROADCAST PESAN</b>\nSilakan kirimkan pesan yang ingin Anda siarkan ke <b>seluruh pengguna</b> bot:", Markup.inlineKeyboard([[Markup.button.callback("◁ Batal", "admin_back")]]));
 });
 
 bot.action("admin_stats", async (ctx) => {
@@ -504,10 +517,9 @@ bot.action("admin_stats", async (ctx) => {
 
   const text = `📊 <b>STATISTIK SISTEM GLOBAL</b>\n───────────────\n👥 Total Registrasi User: <b>${users.size}</b>\n🤖 Total Bot Pribadi Taut: <b>${totalBots}</b>\n🔍 Total Laporan Dibuat: <b>${totalCek}</b>\n📱 Total Nomor Dieksekusi: <b>${totalNomor}</b>\n\n🔧 Mode: ${loadConfig().maintenanceMode ? "Maintenance" : "Normal"}`;
   
-  await ctx.editMessageCaption(text, {parse_mode: "HTML", ...Markup.inlineKeyboard([[Markup.button.callback("◁ Kembali", "admin_back")]])}).catch(()=>{});
+  await safeEditCaption(ctx, text, Markup.inlineKeyboard([[Markup.button.callback("◁ Kembali", "admin_back")]]));
 });
 
-// SENDER GLOBAL MANAGEMENT
 bot.action("admin_global", async (ctx) => {
   if (!ADMIN_IDS.includes(ctx.from.id)) return;
   const config = loadConfig();
@@ -529,13 +541,13 @@ bot.action("admin_global", async (ctx) => {
   }
   kbd.push([Markup.button.callback("◁ Kembali", "admin_back")]);
 
-  await ctx.editMessageCaption(text, {parse_mode: "HTML", ...Markup.inlineKeyboard(kbd)}).catch(()=>{});
+  await safeEditCaption(ctx, text, Markup.inlineKeyboard(kbd));
 });
 
 bot.action("admin_act_global_pair", async (ctx) => {
   if (!ADMIN_IDS.includes(ctx.from.id)) return;
   ctx.session.adminAction = "global_pair";
-  await ctx.editMessageCaption("🌍 <b>PAIRING SENDER GLOBAL</b>\nKirimkan nomor WhatsApp yang ingin diatur sebagai Sender Global (Server Pusat). Pastikan formatnya benar, misal: 628xxxx", {parse_mode:"HTML", ...Markup.inlineKeyboard([[Markup.button.callback("◁ Batal", "admin_global")]])}).catch(()=>{});
+  await safeEditCaption(ctx, "🌍 <b>PAIRING SENDER GLOBAL</b>\nKirimkan nomor WhatsApp yang ingin diatur sebagai Sender Global (Server Pusat). Pastikan formatnya benar, misal: 628xxxx", Markup.inlineKeyboard([[Markup.button.callback("◁ Batal", "admin_global")]]));
 });
 
 bot.action("admin_act_global_start", async (ctx) => {
@@ -555,7 +567,7 @@ bot.action("admin_act_global_del", async (ctx) => {
   const config = loadConfig();
   config.globalSenderPhone = null;
   saveConfig(config);
-  await ctx.editMessageCaption("✅ <b>Sender Global Dihapus</b>", {parse_mode: "HTML", ...Markup.inlineKeyboard([[Markup.button.callback("◁ Kembali", "admin_global")]])}).catch(()=>{});
+  await safeEditCaption(ctx, "✅ <b>Sender Global Dihapus</b>", Markup.inlineKeyboard([[Markup.button.callback("◁ Kembali", "admin_global")]]));
 });
 
 async function startGlobalBotSession(ctx: Context | null, phone: string) {
@@ -601,35 +613,18 @@ async function startGlobalBotSession(ctx: Context | null, phone: string) {
 
 bot.hears("📱 Cek Bio", async (ctx) => {
   ctx.session.waitingForBotNumber = false; 
-  const config = loadConfig();
   const text = `📱 <b>PILIH SENDER CEK BIO</b>\n───────────────\nPilih jalur pengiriman yang ingin Anda gunakan untuk proses pengecekan:\n\n🌍 <b>SENDER GLOBAL</b>\n<blockquote>Menggunakan sistem server pusat. Anda tidak perlu menautkan nomor pribadi. Kecepatan dan antrean bergantung pada kepadatan pengguna global.</blockquote>\n\n👤 <b>SENDER USER (PRIBADI)</b>\n<blockquote>Menggunakan nomor WhatsApp Anda sendiri yang telah ditautkan ke bot. Lebih privat, independen, dan terbebas dari antrean server global.</blockquote>\n\n👇 <i>Silakan pilih sender di bawah ini:</i>`;
-  
-  await ctx.replyWithPhoto(
-    { url: config.bgImage },
-    {
-      caption: text,
-      parse_mode: "HTML",
-      ...Markup.inlineKeyboard([
-        [Markup.button.callback("👤 SENDER USER", "mode_user")],
-        [Markup.button.callback("🌍 SENDER GLOBAL", "mode_global")]
-      ])
-    }
-  );
+  await safeReplyWithPhoto(ctx, text, Markup.inlineKeyboard([
+    [Markup.button.callback("👤 SENDER USER", "mode_user")],
+    [Markup.button.callback("🌍 SENDER GLOBAL", "mode_global")]
+  ]));
 });
 
 bot.hears("🤖 Daftar Bot", async (ctx) => {
   ctx.session.waitingForBotNumber = false;
   const user = getUser(ctx.from.id);
-  const config = loadConfig();
   if (!user || !user.bots || user.bots.length === 0) {
-    await ctx.replyWithPhoto(
-      { url: config.bgImage },
-      {
-        caption: "📭 <b>Belum ada bot yang ditambahkan.</b>\nSilakan tambahkan nomor terlebih dahulu.",
-        parse_mode: "HTML",
-        ...Markup.inlineKeyboard([[Markup.button.callback("➕ Tambah Bot", "menu_tambah_bot")]])
-      }
-    );
+    await safeReplyWithPhoto(ctx, "📭 <b>Belum ada bot yang ditambahkan.</b>\nSilakan tambahkan nomor terlebih dahulu.", Markup.inlineKeyboard([[Markup.button.callback("➕ Tambah Bot", "menu_tambah_bot")]]));
     return;
   }
   let text = "🤖 <b>DAFTAR BOT USER</b>\n───────────────\nBerikut adalah daftar nomor bot pribadi Anda:\n\n";
@@ -639,36 +634,28 @@ bot.hears("🤖 Daftar Bot", async (ctx) => {
     text += `• <code>${b.phoneNumber}</code> - ${online ? "✅ Online" : "❌ Offline"} (${b.pairingStatus ?? "idle"})\n`;
     keyboard.push([Markup.button.callback(`⚙️ Kelola ${b.phoneNumber}`, `detail_bot_${b.id}`)]);
   }
-  await ctx.replyWithPhoto({ url: config.bgImage }, { caption: text, parse_mode: "HTML", ...Markup.inlineKeyboard(keyboard) });
+  await safeReplyWithPhoto(ctx, text, Markup.inlineKeyboard(keyboard));
 });
 
 bot.hears("📜 Riwayat", async (ctx) => {
   ctx.session.waitingForBotNumber = false;
-  const config = loadConfig();
   const rows = getUserHistory(ctx.from.id, 10);
   if (!rows.length) {
-    await ctx.replyWithPhoto(
-      { url: config.bgImage },
-      { caption: "📭 <b>Belum ada riwayat pengecekan.</b>\nRiwayat akan muncul setelah Anda melakukan Cek Bio.", parse_mode: "HTML" }
-    );
+    await safeReplyWithPhoto(ctx, "📭 <b>Belum ada riwayat pengecekan.</b>\nRiwayat akan muncul setelah Anda melakukan Cek Bio.");
     return;
   }
   const keyboard: any[][] = [];
   rows.forEach((h, i) => {
     keyboard.push([Markup.button.callback(`${i + 1}. ${new Date(h.timestamp).toLocaleString("id-ID")} (${h.totalNumbers} No)`, `history_${h.id}`)]);
   });
-  await ctx.replyWithPhoto(
-    { url: config.bgImage },
-    { caption: "📜 <b>RIWAYAT CEK BIO</b>\n───────────────\nPilih riwayat untuk melihat laporan detail:", parse_mode: "HTML", ...Markup.inlineKeyboard(keyboard) }
-  );
+  await safeReplyWithPhoto(ctx, "📜 <b>RIWAYAT CEK BIO</b>\n───────────────\nPilih riwayat untuk melihat laporan detail:", Markup.inlineKeyboard(keyboard));
 });
 
 bot.hears("➕ Tambah Bot", async (ctx) => {
   ctx.session.waitingForBotNumber = true;
   ctx.session.pendingCheck = undefined;
-  const config = loadConfig();
   const text = `➕ <b>TAMBAH BOT USER</b>\n───────────────\n<blockquote>Kirim nomor WhatsApp yang akan dijadikan sender. ”\nPastikan nomor aktif dan siap menerima kode pairing.\n\n<b>Contoh Format:</b>\n6281234567890\n+6281234567890\n+748394834\n2348948394</blockquote>\n<i>Kirim nomor sekarang:</i>`;
-  await ctx.replyWithPhoto({ url: config.bgImage }, { caption: text, parse_mode: "HTML" });
+  await safeReplyWithPhoto(ctx, text);
 });
 
 bot.action("menu_tambah_bot", async (ctx) => {
@@ -677,7 +664,7 @@ bot.action("menu_tambah_bot", async (ctx) => {
     ctx.session.waitingForBotNumber = true;
     ctx.session.pendingCheck = undefined;
     const text = `➕ <b>TAMBAH BOT USER</b>\n───────────────\n<blockquote>Kirim nomor WhatsApp yang akan dijadikan sender. ”\nPastikan nomor aktif dan siap menerima kode pairing.\n\n<b>Contoh Format:</b>\n6281234567890\n+6281234567890\n+748394834\n2348948394</blockquote>\n<i>Kirim nomor sekarang:</i>`;
-    await ctx.editMessageCaption(text, { parse_mode: "HTML" }).catch(() => {});
+    await safeEditCaption(ctx, text);
   } catch(e) {}
 });
 
@@ -729,12 +716,10 @@ async function startUserBotSession(ctx: Context | null, userId: number, phone: s
 }
 
 async function initAllSessions() {
-    // 1. Init Global
     const cfg = loadConfig();
     if (cfg.globalSenderPhone) {
       await startGlobalBotSession(null, cfg.globalSenderPhone).catch(e => console.log("Global session init error", e));
     }
-    // 2. Init Users
     const users = loadUsers();
     for (const user of users.values()) {
         if (!user.bots) continue;
@@ -803,7 +788,7 @@ bot.action(/^detail_bot_(.+)$/, async (ctx) => {
       kbd.push([Markup.button.callback("▶️ Start / Restart Bot", `start_bot_${sessionId}`)]);
     }
     kbd.push([Markup.button.callback("🗑 Hapus Bot", `delete_bot_${sessionId}`)]);
-    await ctx.editMessageCaption(detailText, { parse_mode: "HTML", ...Markup.inlineKeyboard(kbd) }).catch(() => {});
+    await safeEditCaption(ctx, detailText, Markup.inlineKeyboard(kbd));
   } catch(e){}
 });
 
@@ -813,7 +798,7 @@ bot.action(/^delete_bot_(.+)$/, async (ctx) => {
     const sessionId = (ctx.match as RegExpExecArray)[1];
     await engine.deleteSession(sessionId).catch(console.error);
     removeBotFromUser(ctx.from.id, sessionId);
-    await ctx.editMessageCaption("✅ <b>Bot berhasil dihapus.</b>", { parse_mode: "HTML" }).catch(() => {});
+    await safeEditCaption(ctx, "✅ <b>Bot berhasil dihapus.</b>");
   } catch(e){}
 });
 
@@ -825,18 +810,18 @@ bot.action("mode_user", async (ctx) => {
     const actives = (getUser(ctx.from.id)?.bots || []).filter((b) => b.isActive && engine.isSessionConnected(b.id));
 
     if (actives.length === 0) {
-      await ctx.editMessageCaption("❌ <b>TIDAK ADA BOT AKTIF</b>\n───────────────\nSilakan tambahkan atau nyalakan bot Anda terlebih dahulu.", { parse_mode: "HTML" }).catch(() => {});
+      await safeEditCaption(ctx, "❌ <b>TIDAK ADA BOT AKTIF</b>\n───────────────\nSilakan tambahkan atau nyalakan bot Anda terlebih dahulu.");
       return;
     }
     if (actives.length === 1) {
       ctx.session.pendingCheck = { mode: "user", botId: actives[0].id, botPhone: actives[0].phoneNumber };
-      await ctx.editMessageCaption("📄 <b>KIRIM DAFTAR NOMOR</b>\n───────────────\nKirim nomor yang ingin dicek (teks manual atau file .txt, maksimal 500 nomor per sesi).", {parse_mode: "HTML"}).catch(() => {});
+      await safeEditCaption(ctx, "📄 <b>KIRIM DAFTAR NOMOR</b>\n───────────────\nKirim nomor yang ingin dicek (teks manual atau file .txt, maksimal 500 nomor per sesi).");
       return;
     }
 
     const keyboard: any[][] = [];
     actives.forEach((b) => keyboard.push([Markup.button.callback(`Pilih ${b.phoneNumber}`, `select_bot_${b.id}`)]));
-    await ctx.editMessageCaption("📱 <b>PILIH BOT AKTIF</b>\n───────────────\nPilih nomor pengirim yang ingin digunakan:", {parse_mode: "HTML", ...Markup.inlineKeyboard(keyboard)}).catch(() => {});
+    await safeEditCaption(ctx, "📱 <b>PILIH BOT AKTIF</b>\n───────────────\nPilih nomor pengirim yang ingin digunakan:", Markup.inlineKeyboard(keyboard));
   } catch(e){}
 });
 
@@ -848,7 +833,7 @@ bot.action(/^select_bot_(.+)$/, async (ctx) => {
     if (!b || !(b.isActive && engine.isSessionConnected(b.id))) return ctx.answerCbQuery("Bot offline", { show_alert: true });
 
     ctx.session.pendingCheck = { mode: "user", botId: b.id, botPhone: b.phoneNumber };
-    await ctx.editMessageCaption("📄 <b>KIRIM DAFTAR NOMOR</b>\n───────────────\nKirim nomor yang ingin dicek (teks manual atau file .txt, maksimal 500 nomor per sesi).", {parse_mode: "HTML"}).catch(() => {});
+    await safeEditCaption(ctx, "📄 <b>KIRIM DAFTAR NOMOR</b>\n───────────────\nKirim nomor yang ingin dicek (teks manual atau file .txt, maksimal 500 nomor per sesi).");
   } catch(e){}
 });
 
@@ -856,11 +841,11 @@ bot.action("mode_global", async (ctx) => {
   try {
     await ctx.answerCbQuery().catch(() => {});
     if (!globalSessionReady || !engine.isSessionConnected(GLOBAL_SESSION_ID)) {
-      await ctx.editMessageCaption("❌ Global sender sedang offline atau dalam perbaikan.").catch(() => {});
+      await safeEditCaption(ctx, "❌ Global sender sedang offline atau dalam perbaikan.");
       return;
     }
     ctx.session.pendingCheck = { mode: "global", botId: GLOBAL_SESSION_ID };
-    await ctx.editMessageCaption("📄 <b>KIRIM DAFTAR NOMOR</b>\n───────────────\nKirim nomor yang ingin dicek (teks manual atau file .txt, maksimal 500 nomor per sesi).", {parse_mode:"HTML"}).catch(() => {});
+    await safeEditCaption(ctx, "📄 <b>KIRIM DAFTAR NOMOR</b>\n───────────────\nKirim nomor yang ingin dicek (teks manual atau file .txt, maksimal 500 nomor per sesi).");
   } catch(e){}
 });
 
@@ -935,10 +920,9 @@ bot.action(/^vcat_([^_]+)_([^_]+)(?:_(\d+))?$/, async (ctx) => {
     }
     kbd.push([Markup.button.callback("◁ Kembali", `vsum_${reportId}`)]);
 
-    await ctx.editMessageCaption(text, {
-        parse_mode: "HTML",
-        ...Markup.inlineKeyboard(kbd)
-    }).catch(()=>{});
+    // Untuk pagination laporan detail tidak perlu aman karena awalnya text dari dokumen, biarkan jalan native editMessageCaption/text
+    try { await ctx.editMessageCaption(text, { parse_mode: "HTML", ...Markup.inlineKeyboard(kbd) }); } 
+    catch { await ctx.editMessageText(text, { parse_mode: "HTML", ...Markup.inlineKeyboard(kbd) }).catch(()=>{}); }
   } catch (error) {}
 });
 
@@ -948,7 +932,8 @@ bot.action(/^vsum_([^_]+)$/, async (ctx) => {
     const reportId = ctx.match[1];
     const item = getUserHistory(ctx.from.id, 100).find(x => x.id === reportId);
     if (!item) return;
-    await ctx.editMessageCaption(getSummaryCaption(item), { parse_mode: "HTML", ...getSummaryKeyboard(item) }).catch(()=>{});
+    try { await ctx.editMessageCaption(getSummaryCaption(item), { parse_mode: "HTML", ...getSummaryKeyboard(item) }); }
+    catch { await ctx.editMessageText(getSummaryCaption(item), { parse_mode: "HTML", ...getSummaryKeyboard(item) }).catch(()=>{}); }
   } catch(e){}
 });
 
@@ -1024,6 +1009,7 @@ async function handleCheckNumbers(ctx: BotContext, textContent: string) {
 
 /* ===================== MESSAGE HANDLERS ===================== */
 
+// Menerima file/dokumen (TXT)
 bot.on(message("document"), async (ctx) => {
   if (!ctx.session.pendingCheck) return;
 
@@ -1044,6 +1030,23 @@ bot.on(message("document"), async (ctx) => {
   }
 });
 
+// Menerima upload foto langsung (Galeri) khusus untuk ganti background
+bot.on(message("photo"), async (ctx) => {
+  const userId = ctx.from.id;
+  if (ctx.session.adminAction === "bg" && ADMIN_IDS.includes(userId)) {
+    ctx.session.adminAction = undefined;
+    // Mengambil file ID kualitas tertinggi yang diupload dari galeri
+    const fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
+    
+    const config = loadConfig();
+    config.bgImage = fileId; // Simpan file_id ke config
+    saveConfig(config);
+    
+    return ctx.reply("✅ <b>Background berhasil diubah!</b>\nFoto dari galeri Anda telah terpasang ke seluruh sistem.", {parse_mode: "HTML"});
+  }
+});
+
+// Menerima input Teks (Command / URL / Nomor)
 bot.on(message("text"), async (ctx) => {
   const userId = ctx.from.id;
   const text = ctx.message.text.trim();
@@ -1064,14 +1067,14 @@ bot.on(message("text"), async (ctx) => {
     return ctx.telegram.editMessageText(ctx.chat.id, broadcastMsg.message_id, undefined, `✅ <b>Broadcast Selesai</b>\nBerhasil: ${success}\nGagal: ${failed}`, {parse_mode: "HTML"});
   }
 
-  // STATE: ADMIN CHANGE BACKGROUND
+  // STATE: ADMIN CHANGE BACKGROUND VIA URL
   if (ctx.session.adminAction === "bg" && ADMIN_IDS.includes(userId)) {
     ctx.session.adminAction = undefined;
-    if (!text.startsWith("http")) return ctx.reply("❌ Format URL tidak valid.");
+    if (!text.startsWith("http")) return ctx.reply("❌ Format URL tidak valid. Harap kirim Link URL atau langsung Upload Foto dari Galeri Anda.");
     const config = loadConfig();
     config.bgImage = text;
     saveConfig(config);
-    return ctx.reply("✅ Background berhasil diubah!");
+    return ctx.reply("✅ Background berhasil diubah menggunakan URL!");
   }
 
   // STATE: ADMIN BAN USER
