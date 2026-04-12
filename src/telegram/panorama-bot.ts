@@ -26,9 +26,6 @@ process.on("unhandledRejection", (reason, promise) => {
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "YOUR_BOT_TOKEN_HERE";
 const ADMIN_IDS = [process.env.ADMIN_ID ? parseInt(process.env.ADMIN_ID, 10) : 0];
 
-// GANTI URL DI BAWAH INI DENGAN URL FOTO LATAR (BACKGROUND) ANDA
-const BG_IMAGE = "https://placehold.co/800x400/1a1a1a/ff3333.png?text=LANGRIS+CEK+BIO+BOT";
-
 const engine = new WhatsAppBulkCheckerEngine();
 const GLOBAL_SESSION_ID = "panorama_global_sender";
 let globalSessionReady = false;
@@ -36,6 +33,13 @@ let globalSessionReady = false;
 const pairingMessageTracker: Record<string, number> = {};
 
 /* ===================== TYPES ===================== */
+
+interface SystemConfig {
+  bgImage: string;
+  maintenanceMode: boolean;
+  bannedUsers: number[];
+  globalSenderPhone: string | null;
+}
 
 interface PanoramaBot {
   id: string;
@@ -78,7 +82,7 @@ interface PendingCheck {
 interface SessionData {
   waitingForBotNumber?: boolean;
   pendingCheck?: PendingCheck;
-  adminWaitingGlobal?: boolean;
+  adminAction?: "bg" | "broadcast" | "ban" | "unban" | "global_pair";
 }
 
 type BotContext = Context & { session: SessionData };
@@ -90,6 +94,23 @@ if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const USERS_FILE = path.join(DATA_DIR, "users.json");
 const HISTORY_FILE = path.join(DATA_DIR, "history.json");
+const CONFIG_FILE = path.join(DATA_DIR, "config.json");
+
+function loadConfig(): SystemConfig {
+  if (!fs.existsSync(CONFIG_FILE)) {
+    return {
+      bgImage: "https://placehold.co/800x400/1a1a1a/ff3333.png?text=LANGRIS+CEK+BIO+BOT",
+      maintenanceMode: false,
+      bannedUsers: [],
+      globalSenderPhone: null
+    };
+  }
+  return JSON.parse(fs.readFileSync(CONFIG_FILE, "utf-8"));
+}
+
+function saveConfig(cfg: SystemConfig) {
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2));
+}
 
 function loadUsers(): Map<number, PanoramaUser> {
   if (!fs.existsSync(USERS_FILE)) return new Map();
@@ -182,10 +203,16 @@ async function createExcelBuffer(numbers: string[], title: string): Promise<Buff
 
 /* ===================== UI FORMATTER ===================== */
 
-const replyKeyboard = Markup.keyboard([
-  ["📱 Cek Bio", "🤖 Daftar Bot"],
-  ["📜 Riwayat", "➕ Tambah Bot"]
-]).resize();
+function getReplyKeyboard(userId: number) {
+  const kbd = [
+    ["📱 Cek Bio", "🤖 Daftar Bot"],
+    ["📜 Riwayat", "➕ Tambah Bot"]
+  ];
+  if (ADMIN_IDS.includes(userId)) {
+    kbd.push(["⚙️ Navigator Admin"]);
+  }
+  return Markup.keyboard(kbd).resize();
+}
 
 function generateMainMenuHTML(user: PanoramaUser): string {
   const users = loadUsers();
@@ -324,10 +351,31 @@ function filterCategory(summary: CheckSummary, cat: string) {
   return { filtered, title };
 }
 
-/* ===================== BOT INIT ===================== */
+/* ===================== BOT INIT & MIDDLEWARES ===================== */
 
 const bot = new Telegraf<BotContext>(BOT_TOKEN);
 bot.use(session({ defaultSession: (): SessionData => ({}) }));
+
+// Middleware Akses Kontrol & Maintenance
+bot.use(async (ctx, next) => {
+  if (!ctx.from) return next();
+  const config = loadConfig();
+  const isAdmin = ADMIN_IDS.includes(ctx.from.id);
+
+  if (config.bannedUsers.includes(ctx.from.id) && !isAdmin) {
+    // User di-banned, bot diam
+    return;
+  }
+
+  if (config.maintenanceMode && !isAdmin) {
+    if (ctx.message && 'text' in ctx.message && ctx.message.text === '/start') {
+      await ctx.reply("🛠 <b>Sistem Sedang Maintenance</b>\nBot sedang dalam tahap perbaikan atau pembaruan. Silakan coba lagi nanti.", {parse_mode: "HTML"});
+    }
+    return;
+  }
+
+  return next();
+});
 
 bot.start(async (ctx) => {
   const userId = ctx.from.id;
@@ -337,13 +385,14 @@ bot.start(async (ctx) => {
     saveUser(user);
   }
   
+  const config = loadConfig();
   await ctx.replyWithPhoto(
-    { url: BG_IMAGE },
+    { url: config.bgImage },
     {
       caption: generateMainMenuHTML(user),
       parse_mode: "HTML",
-      message_effect_id: "5104841245755180586", // Efek Api (opsional jika support)
-      ...replyKeyboard
+      message_effect_id: "5104841245755180586", 
+      ...getReplyKeyboard(userId)
     } as any
   );
 });
@@ -353,18 +402,210 @@ bot.action("back_main", async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
     const user = getUser(ctx.from.id);
     if(!user) return;
+    const config = loadConfig();
     await ctx.editMessageCaption(generateMainMenuHTML(user), { parse_mode: "HTML" }).catch(() => {});
   } catch(e) {}
 });
+
+/* ===================== NAVIGATOR ADMIN ===================== */
+
+bot.hears("⚙️ Navigator Admin", async (ctx) => {
+  if (!ADMIN_IDS.includes(ctx.from.id)) return;
+  ctx.session.adminAction = undefined; // reset state
+  
+  const config = loadConfig();
+  const text = `⚙️ <b>NAVIGATOR ADMIN</b>\n───────────────\nSelamat datang di Panel Admin. Pilih menu kendali sistem di bawah ini:\n\n🛠 <b>Status Maintenance:</b> ${config.maintenanceMode ? "🔴 AKTIF (User Terblokir)" : "🟢 NONAKTIF (Normal)"}\n🌍 <b>Sender Global:</b> ${config.globalSenderPhone ? `<code>${config.globalSenderPhone}</code>` : "Belum Diatur"}`;
+  
+  const kbd = Markup.inlineKeyboard([
+    [Markup.button.callback("👥 Manajemen Pengguna", "admin_users"), Markup.button.callback("🌍 Sender Global", "admin_global")],
+    [Markup.button.callback("🛠 Toggle Maintenance", "admin_maintenance"), Markup.button.callback("🖼 Ganti Background", "admin_bg")],
+    [Markup.button.callback("📊 Statistik Sistem", "admin_stats"), Markup.button.callback("📢 Broadcast Pesan", "admin_broadcast")]
+  ]);
+  
+  await ctx.replyWithPhoto({url: config.bgImage}, {caption: text, parse_mode: "HTML", ...kbd});
+});
+
+bot.action("admin_back", async (ctx) => {
+  if (!ADMIN_IDS.includes(ctx.from.id)) return;
+  ctx.session.adminAction = undefined;
+  const config = loadConfig();
+  const text = `⚙️ <b>NAVIGATOR ADMIN</b>\n───────────────\nSelamat datang di Panel Admin. Pilih menu kendali sistem di bawah ini:\n\n🛠 <b>Status Maintenance:</b> ${config.maintenanceMode ? "🔴 AKTIF (User Terblokir)" : "🟢 NONAKTIF (Normal)"}\n🌍 <b>Sender Global:</b> ${config.globalSenderPhone ? `<code>${config.globalSenderPhone}</code>` : "Belum Diatur"}`;
+  
+  const kbd = Markup.inlineKeyboard([
+    [Markup.button.callback("👥 Manajemen Pengguna", "admin_users"), Markup.button.callback("🌍 Sender Global", "admin_global")],
+    [Markup.button.callback("🛠 Toggle Maintenance", "admin_maintenance"), Markup.button.callback("🖼 Ganti Background", "admin_bg")],
+    [Markup.button.callback("📊 Statistik Sistem", "admin_stats"), Markup.button.callback("📢 Broadcast Pesan", "admin_broadcast")]
+  ]);
+  await ctx.editMessageCaption(text, {parse_mode: "HTML", ...kbd}).catch(()=>{});
+});
+
+bot.action("admin_users", async (ctx) => {
+  if (!ADMIN_IDS.includes(ctx.from.id)) return;
+  const config = loadConfig();
+  const text = `👥 <b>MANAJEMEN PENGGUNA</b>\n───────────────\nTotal Banned User: <b>${config.bannedUsers.length}</b>\n\nSilakan pilih tindakan:`;
+  const kbd = Markup.inlineKeyboard([
+    [Markup.button.callback("🚫 Banned User", "admin_act_ban"), Markup.button.callback("✅ Unban User", "admin_act_unban")],
+    [Markup.button.callback("◁ Kembali", "admin_back")]
+  ]);
+  await ctx.editMessageCaption(text, {parse_mode: "HTML", ...kbd}).catch(()=>{});
+});
+
+bot.action("admin_act_ban", async (ctx) => {
+  if (!ADMIN_IDS.includes(ctx.from.id)) return;
+  ctx.session.adminAction = "ban";
+  await ctx.editMessageCaption("🚫 <b>BANNED USER</b>\nKirimkan <b>User ID Telegram</b> yang ingin Anda blokir dari sistem:", {parse_mode: "HTML", ...Markup.inlineKeyboard([[Markup.button.callback("◁ Batal", "admin_users")]])}).catch(()=>{});
+});
+
+bot.action("admin_act_unban", async (ctx) => {
+  if (!ADMIN_IDS.includes(ctx.from.id)) return;
+  ctx.session.adminAction = "unban";
+  await ctx.editMessageCaption("✅ <b>UNBAN USER</b>\nKirimkan <b>User ID Telegram</b> yang ingin Anda pulihkan aksesnya:", {parse_mode: "HTML", ...Markup.inlineKeyboard([[Markup.button.callback("◁ Batal", "admin_users")]])}).catch(()=>{});
+});
+
+bot.action("admin_maintenance", async (ctx) => {
+  if (!ADMIN_IDS.includes(ctx.from.id)) return;
+  const config = loadConfig();
+  config.maintenanceMode = !config.maintenanceMode;
+  saveConfig(config);
+  await ctx.answerCbQuery(`Maintenance Mode: ${config.maintenanceMode ? "AKTIF" : "NONAKTIF"}`).catch(()=>{});
+  
+  // Refresh Menu
+  const text = `⚙️ <b>NAVIGATOR ADMIN</b>\n───────────────\nSelamat datang di Panel Admin. Pilih menu kendali sistem di bawah ini:\n\n🛠 <b>Status Maintenance:</b> ${config.maintenanceMode ? "🔴 AKTIF (User Terblokir)" : "🟢 NONAKTIF (Normal)"}\n🌍 <b>Sender Global:</b> ${config.globalSenderPhone ? `<code>${config.globalSenderPhone}</code>` : "Belum Diatur"}`;
+  const kbd = Markup.inlineKeyboard([
+    [Markup.button.callback("👥 Manajemen Pengguna", "admin_users"), Markup.button.callback("🌍 Sender Global", "admin_global")],
+    [Markup.button.callback("🛠 Toggle Maintenance", "admin_maintenance"), Markup.button.callback("🖼 Ganti Background", "admin_bg")],
+    [Markup.button.callback("📊 Statistik Sistem", "admin_stats"), Markup.button.callback("📢 Broadcast Pesan", "admin_broadcast")]
+  ]);
+  await ctx.editMessageCaption(text, {parse_mode: "HTML", ...kbd}).catch(()=>{});
+});
+
+bot.action("admin_bg", async (ctx) => {
+  if (!ADMIN_IDS.includes(ctx.from.id)) return;
+  ctx.session.adminAction = "bg";
+  await ctx.editMessageCaption("🖼 <b>GANTI BACKGROUND BOT</b>\nSilakan kirimkan <b>URL Gambar/Foto</b> (http/https format .png/.jpg) yang ingin dijadikan latar belakang utama bot:", {parse_mode: "HTML", ...Markup.inlineKeyboard([[Markup.button.callback("◁ Batal", "admin_back")]])}).catch(()=>{});
+});
+
+bot.action("admin_broadcast", async (ctx) => {
+  if (!ADMIN_IDS.includes(ctx.from.id)) return;
+  ctx.session.adminAction = "broadcast";
+  await ctx.editMessageCaption("📢 <b>BROADCAST PESAN</b>\nSilakan kirimkan pesan yang ingin Anda siarkan ke <b>seluruh pengguna</b> bot:", {parse_mode: "HTML", ...Markup.inlineKeyboard([[Markup.button.callback("◁ Batal", "admin_back")]])}).catch(()=>{});
+});
+
+bot.action("admin_stats", async (ctx) => {
+  if (!ADMIN_IDS.includes(ctx.from.id)) return;
+  const users = loadUsers();
+  const history = loadHistory();
+  
+  let totalBots = 0;
+  for (const u of users.values()) totalBots += (u.bots || []).length;
+  
+  const totalCek = history.length;
+  const totalNomor = history.reduce((acc, h) => acc + h.totalNumbers, 0);
+
+  const text = `📊 <b>STATISTIK SISTEM GLOBAL</b>\n───────────────\n👥 Total Registrasi User: <b>${users.size}</b>\n🤖 Total Bot Pribadi Taut: <b>${totalBots}</b>\n🔍 Total Laporan Dibuat: <b>${totalCek}</b>\n📱 Total Nomor Dieksekusi: <b>${totalNomor}</b>\n\n🔧 Mode: ${loadConfig().maintenanceMode ? "Maintenance" : "Normal"}`;
+  
+  await ctx.editMessageCaption(text, {parse_mode: "HTML", ...Markup.inlineKeyboard([[Markup.button.callback("◁ Kembali", "admin_back")]])}).catch(()=>{});
+});
+
+// SENDER GLOBAL MANAGEMENT
+bot.action("admin_global", async (ctx) => {
+  if (!ADMIN_IDS.includes(ctx.from.id)) return;
+  const config = loadConfig();
+  const isOnline = engine.isSessionConnected(GLOBAL_SESSION_ID);
+  const info = engine.getSessionPairingInfo(GLOBAL_SESSION_ID);
+
+  let text = `🌍 <b>MONITORING SENDER GLOBAL</b>\n───────────────\n`;
+  if (config.globalSenderPhone) {
+    text += `📱 Nomor: <code>${config.globalSenderPhone}</code>\n🟢 Status Runtime: ${info?.pairingStatus ?? "Offline"}\n📡 Koneksi: ${isOnline ? "Tersambung (Siap)" : "Terputus"}\n⚠️ Last Error: ${info?.lastError ?? "-"}`;
+  } else {
+    text += `<i>Belum ada nomor Sender Global yang diatur.</i>`;
+  }
+
+  const kbd: any[][] = [];
+  kbd.push([Markup.button.callback("➕ Pair / Ganti Nomor Global", "admin_act_global_pair")]);
+  if (config.globalSenderPhone) {
+    kbd.push([Markup.button.callback("▶️ Start / Retry Koneksi", "admin_act_global_start")]);
+    kbd.push([Markup.button.callback("🗑 Hapus Sesi Global", "admin_act_global_del")]);
+  }
+  kbd.push([Markup.button.callback("◁ Kembali", "admin_back")]);
+
+  await ctx.editMessageCaption(text, {parse_mode: "HTML", ...Markup.inlineKeyboard(kbd)}).catch(()=>{});
+});
+
+bot.action("admin_act_global_pair", async (ctx) => {
+  if (!ADMIN_IDS.includes(ctx.from.id)) return;
+  ctx.session.adminAction = "global_pair";
+  await ctx.editMessageCaption("🌍 <b>PAIRING SENDER GLOBAL</b>\nKirimkan nomor WhatsApp yang ingin diatur sebagai Sender Global (Server Pusat). Pastikan formatnya benar, misal: 628xxxx", {parse_mode:"HTML", ...Markup.inlineKeyboard([[Markup.button.callback("◁ Batal", "admin_global")]])}).catch(()=>{});
+});
+
+bot.action("admin_act_global_start", async (ctx) => {
+  if (!ADMIN_IDS.includes(ctx.from.id)) return;
+  const config = loadConfig();
+  if (!config.globalSenderPhone) return;
+  await ctx.answerCbQuery("Starting global session...").catch(()=>{});
+  const msg = await ctx.reply("⏳ Menghubungkan Global Sender...");
+  pairingMessageTracker[GLOBAL_SESSION_ID] = msg.message_id;
+  await startGlobalBotSession(ctx, config.globalSenderPhone);
+});
+
+bot.action("admin_act_global_del", async (ctx) => {
+  if (!ADMIN_IDS.includes(ctx.from.id)) return;
+  await ctx.answerCbQuery("Menghapus sesi global...").catch(()=>{});
+  await engine.deleteSession(GLOBAL_SESSION_ID);
+  const config = loadConfig();
+  config.globalSenderPhone = null;
+  saveConfig(config);
+  await ctx.editMessageCaption("✅ <b>Sender Global Dihapus</b>", {parse_mode: "HTML", ...Markup.inlineKeyboard([[Markup.button.callback("◁ Kembali", "admin_global")]])}).catch(()=>{});
+});
+
+async function startGlobalBotSession(ctx: Context | null, phone: string) {
+  const config: SessionConfig = { sessionId: GLOBAL_SESSION_ID, senderType: "global_sender", label: "Global Sender" };
+  const options: InitSessionOptions = {
+    phoneNumber: phone,
+    onPairingCode: async (_sid, code) => {
+      const cfg = loadConfig(); cfg.globalSenderPhone = phone; saveConfig(cfg);
+      if (ctx) {
+        const text = `🌍 <b>KODE PAIRING GLOBAL</b>\n───────────────\nNomor: <code>${phone}</code>\nKode: <code>${code}</code>`;
+        if (pairingMessageTracker[GLOBAL_SESSION_ID]) {
+           await ctx.telegram.editMessageText(ctx.chat!.id, pairingMessageTracker[GLOBAL_SESSION_ID], undefined, text, {parse_mode: "HTML"}).catch(()=>{});
+        } else {
+           const msg = await ctx.reply(text, {parse_mode: "HTML"});
+           pairingMessageTracker[GLOBAL_SESSION_ID] = msg.message_id;
+        }
+      }
+    },
+    onConnected: async () => {
+      globalSessionReady = true;
+      if (ctx) {
+        const text = `✅ <b>GLOBAL SENDER TERHUBUNG</b>\nNomor: <code>${phone}</code> siap melayani semua user.`;
+        if (pairingMessageTracker[GLOBAL_SESSION_ID]) {
+           await ctx.telegram.editMessageText(ctx.chat!.id, pairingMessageTracker[GLOBAL_SESSION_ID], undefined, text, {parse_mode: "HTML"}).catch(()=>{});
+           delete pairingMessageTracker[GLOBAL_SESSION_ID];
+        } else await ctx.reply(text, {parse_mode: "HTML"});
+      }
+    },
+    onFailed: async (_sid, reason) => {
+      globalSessionReady = false;
+      if (ctx) {
+        const text = `❌ <b>GLOBAL SENDER GAGAL</b>\nError: ${reason}`;
+        if (pairingMessageTracker[GLOBAL_SESSION_ID]) {
+           await ctx.telegram.editMessageText(ctx.chat!.id, pairingMessageTracker[GLOBAL_SESSION_ID], undefined, text, {parse_mode: "HTML"}).catch(()=>{});
+        } else await ctx.reply(text, {parse_mode: "HTML"});
+      }
+    }
+  };
+  await engine.createSession(config, options);
+}
 
 /* ===================== REPLY KEYBOARD HANDLERS ===================== */
 
 bot.hears("📱 Cek Bio", async (ctx) => {
   ctx.session.waitingForBotNumber = false; 
+  const config = loadConfig();
   const text = `📱 <b>PILIH SENDER CEK BIO</b>\n───────────────\nPilih jalur pengiriman yang ingin Anda gunakan untuk proses pengecekan:\n\n🌍 <b>SENDER GLOBAL</b>\n<blockquote>Menggunakan sistem server pusat. Anda tidak perlu menautkan nomor pribadi. Kecepatan dan antrean bergantung pada kepadatan pengguna global.</blockquote>\n\n👤 <b>SENDER USER (PRIBADI)</b>\n<blockquote>Menggunakan nomor WhatsApp Anda sendiri yang telah ditautkan ke bot. Lebih privat, independen, dan terbebas dari antrean server global.</blockquote>\n\n👇 <i>Silakan pilih sender di bawah ini:</i>`;
   
   await ctx.replyWithPhoto(
-    { url: BG_IMAGE },
+    { url: config.bgImage },
     {
       caption: text,
       parse_mode: "HTML",
@@ -379,9 +620,10 @@ bot.hears("📱 Cek Bio", async (ctx) => {
 bot.hears("🤖 Daftar Bot", async (ctx) => {
   ctx.session.waitingForBotNumber = false;
   const user = getUser(ctx.from.id);
+  const config = loadConfig();
   if (!user || !user.bots || user.bots.length === 0) {
     await ctx.replyWithPhoto(
-      { url: BG_IMAGE },
+      { url: config.bgImage },
       {
         caption: "📭 <b>Belum ada bot yang ditambahkan.</b>\nSilakan tambahkan nomor terlebih dahulu.",
         parse_mode: "HTML",
@@ -397,15 +639,16 @@ bot.hears("🤖 Daftar Bot", async (ctx) => {
     text += `• <code>${b.phoneNumber}</code> - ${online ? "✅ Online" : "❌ Offline"} (${b.pairingStatus ?? "idle"})\n`;
     keyboard.push([Markup.button.callback(`⚙️ Kelola ${b.phoneNumber}`, `detail_bot_${b.id}`)]);
   }
-  await ctx.replyWithPhoto({ url: BG_IMAGE }, { caption: text, parse_mode: "HTML", ...Markup.inlineKeyboard(keyboard) });
+  await ctx.replyWithPhoto({ url: config.bgImage }, { caption: text, parse_mode: "HTML", ...Markup.inlineKeyboard(keyboard) });
 });
 
 bot.hears("📜 Riwayat", async (ctx) => {
   ctx.session.waitingForBotNumber = false;
+  const config = loadConfig();
   const rows = getUserHistory(ctx.from.id, 10);
   if (!rows.length) {
     await ctx.replyWithPhoto(
-      { url: BG_IMAGE },
+      { url: config.bgImage },
       { caption: "📭 <b>Belum ada riwayat pengecekan.</b>\nRiwayat akan muncul setelah Anda melakukan Cek Bio.", parse_mode: "HTML" }
     );
     return;
@@ -415,7 +658,7 @@ bot.hears("📜 Riwayat", async (ctx) => {
     keyboard.push([Markup.button.callback(`${i + 1}. ${new Date(h.timestamp).toLocaleString("id-ID")} (${h.totalNumbers} No)`, `history_${h.id}`)]);
   });
   await ctx.replyWithPhoto(
-    { url: BG_IMAGE },
+    { url: config.bgImage },
     { caption: "📜 <b>RIWAYAT CEK BIO</b>\n───────────────\nPilih riwayat untuk melihat laporan detail:", parse_mode: "HTML", ...Markup.inlineKeyboard(keyboard) }
   );
 });
@@ -423,8 +666,9 @@ bot.hears("📜 Riwayat", async (ctx) => {
 bot.hears("➕ Tambah Bot", async (ctx) => {
   ctx.session.waitingForBotNumber = true;
   ctx.session.pendingCheck = undefined;
+  const config = loadConfig();
   const text = `➕ <b>TAMBAH BOT USER</b>\n───────────────\n<blockquote>Kirim nomor WhatsApp yang akan dijadikan sender. ”\nPastikan nomor aktif dan siap menerima kode pairing.\n\n<b>Contoh Format:</b>\n6281234567890\n+6281234567890\n+748394834\n2348948394</blockquote>\n<i>Kirim nomor sekarang:</i>`;
-  await ctx.replyWithPhoto({ url: BG_IMAGE }, { caption: text, parse_mode: "HTML" });
+  await ctx.replyWithPhoto({ url: config.bgImage }, { caption: text, parse_mode: "HTML" });
 });
 
 bot.action("menu_tambah_bot", async (ctx) => {
@@ -437,9 +681,8 @@ bot.action("menu_tambah_bot", async (ctx) => {
   } catch(e) {}
 });
 
-/* ===================== ADD BOT & PAIRING ===================== */
+/* ===================== ADD BOT & PAIRING (USER) ===================== */
 
-// PENTING: Proses pairing, loading, dan error WA menggunakan TEXT biasa (tanpa foto) agar tidak spam dan mencegah error API.
 async function startUserBotSession(ctx: Context | null, userId: number, phone: string, sessionId: string) {
     const config: SessionConfig = { sessionId, senderType: "user_sender", label: `User ${userId}` };
     const options: InitSessionOptions = {
@@ -485,7 +728,13 @@ async function startUserBotSession(ctx: Context | null, userId: number, phone: s
     await engine.createSession(config, options);
 }
 
-async function initAllUserSessions() {
+async function initAllSessions() {
+    // 1. Init Global
+    const cfg = loadConfig();
+    if (cfg.globalSenderPhone) {
+      await startGlobalBotSession(null, cfg.globalSenderPhone).catch(e => console.log("Global session init error", e));
+    }
+    // 2. Init Users
     const users = loadUsers();
     for (const user of users.values()) {
         if (!user.bots) continue;
@@ -532,9 +781,6 @@ bot.action(/^start_bot_(.+)$/, async (ctx) => {
     if (!b) return ctx.answerCbQuery("Bot tidak ditemukan", { show_alert: true });
 
     await ctx.answerCbQuery("Memulai ulang bot...").catch(() => {});
-    
-    // Karena ini di-trigger dari panel Detail Bot (yang berupa Foto), 
-    // kita mengirim pesan Teks Baru untuk menghindari bentrok API.
     const msg = await ctx.reply("⏳ Menghubungkan ke server WhatsApp...");
     pairingMessageTracker[sessionId] = msg.message_id;
     await startUserBotSession(ctx, ctx.from.id, b.phoneNumber, sessionId);
@@ -734,7 +980,6 @@ bot.action(/^dlcat_([^_]+)_(.+?)_(.+)$/, async (ctx) => {
 
 /* ===================== LOGIC CEK BIO ===================== */
 
-// PENTING: Proses loading menggunakan Teks biasa agar lebih ringan
 async function handleCheckNumbers(ctx: BotContext, textContent: string) {
   if (!ctx.session.pendingCheck) return;
   const pending = ctx.session.pendingCheck;
@@ -787,7 +1032,6 @@ bot.on(message("document"), async (ctx) => {
     return ctx.reply("❌ Silakan kirim file dengan format .txt");
   }
 
-  // Menggunakan teks biasa untuk loading baca file
   const waitMsg = await ctx.reply("⏳ Membaca dan memproses file dokumen Anda...");
   try {
     const fileUrl = await ctx.telegram.getFileLink(doc.file_id);
@@ -804,6 +1048,68 @@ bot.on(message("text"), async (ctx) => {
   const userId = ctx.from.id;
   const text = ctx.message.text.trim();
 
+  // STATE: ADMIN BROADCAST
+  if (ctx.session.adminAction === "broadcast" && ADMIN_IDS.includes(userId)) {
+    ctx.session.adminAction = undefined;
+    const users = loadUsers();
+    let success = 0, failed = 0;
+    const broadcastMsg = await ctx.reply("📢 Mengirim broadcast...");
+    
+    for (const uid of users.keys()) {
+      try {
+        await bot.telegram.sendMessage(uid, `📢 <b>INFORMASI SISTEM</b>\n───────────────\n${escapeHTML(text)}`, {parse_mode: "HTML"});
+        success++;
+      } catch (e) { failed++; }
+    }
+    return ctx.telegram.editMessageText(ctx.chat.id, broadcastMsg.message_id, undefined, `✅ <b>Broadcast Selesai</b>\nBerhasil: ${success}\nGagal: ${failed}`, {parse_mode: "HTML"});
+  }
+
+  // STATE: ADMIN CHANGE BACKGROUND
+  if (ctx.session.adminAction === "bg" && ADMIN_IDS.includes(userId)) {
+    ctx.session.adminAction = undefined;
+    if (!text.startsWith("http")) return ctx.reply("❌ Format URL tidak valid.");
+    const config = loadConfig();
+    config.bgImage = text;
+    saveConfig(config);
+    return ctx.reply("✅ Background berhasil diubah!");
+  }
+
+  // STATE: ADMIN BAN USER
+  if (ctx.session.adminAction === "ban" && ADMIN_IDS.includes(userId)) {
+    ctx.session.adminAction = undefined;
+    const targetId = parseInt(text, 10);
+    if (isNaN(targetId)) return ctx.reply("❌ ID User tidak valid.");
+    const config = loadConfig();
+    if (!config.bannedUsers.includes(targetId)) {
+      config.bannedUsers.push(targetId);
+      saveConfig(config);
+    }
+    return ctx.reply(`✅ User ID <code>${targetId}</code> berhasil di-Banned.`, {parse_mode: "HTML"});
+  }
+
+  // STATE: ADMIN UNBAN USER
+  if (ctx.session.adminAction === "unban" && ADMIN_IDS.includes(userId)) {
+    ctx.session.adminAction = undefined;
+    const targetId = parseInt(text, 10);
+    if (isNaN(targetId)) return ctx.reply("❌ ID User tidak valid.");
+    const config = loadConfig();
+    config.bannedUsers = config.bannedUsers.filter(id => id !== targetId);
+    saveConfig(config);
+    return ctx.reply(`✅ Akses User ID <code>${targetId}</code> berhasil dipulihkan.`, {parse_mode: "HTML"});
+  }
+
+  // STATE: ADMIN PAIR GLOBAL SENDER
+  if (ctx.session.adminAction === "global_pair" && ADMIN_IDS.includes(userId)) {
+    ctx.session.adminAction = undefined;
+    const phone = sanitizePhone(text);
+    if (!/^\d{8,16}$/.test(phone)) return ctx.reply("❌ Format nomor salah.");
+    const msg = await ctx.reply("⏳ Menghubungkan Global Sender...");
+    pairingMessageTracker[GLOBAL_SESSION_ID] = msg.message_id;
+    await startGlobalBotSession(ctx, phone);
+    return;
+  }
+
+  // STATE: USER PAIRING NEW BOT
   if (ctx.session.waitingForBotNumber) {
     ctx.session.waitingForBotNumber = false;
     const phone = sanitizePhone(text);
@@ -820,13 +1126,13 @@ bot.on(message("text"), async (ctx) => {
     const sessionId = `user_${userId}_${phone}`;
     upsertBot(userId, { id: sessionId, phoneNumber: phone, isActive: false, addedAt: new Date().toISOString(), pairingStatus: "pending_pairing" });
 
-    // Menggunakan teks biasa untuk loading koneksi
     const msg = await ctx.reply("⏳ Menghubungkan ke server WhatsApp...");
     pairingMessageTracker[sessionId] = msg.message_id;
     await startUserBotSession(ctx, userId, phone, sessionId);
     return;
   }
 
+  // STATE: USER SENDING TEXT NUMBERS TO CHECK
   if (ctx.session.pendingCheck) {
     await handleCheckNumbers(ctx, text);
   }
@@ -835,7 +1141,7 @@ bot.on(message("text"), async (ctx) => {
 /* ===================== START ===================== */
 
 async function main() {
-  await initAllUserSessions(); 
+  await initAllSessions(); 
   await bot.launch();
   console.log("🤖 Panorama Bot running...");
   process.once("SIGINT", () => bot.stop("SIGINT"));
