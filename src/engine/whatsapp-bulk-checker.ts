@@ -143,7 +143,6 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
   return out;
 }
 
-// FORMAT INPUT: Mengabaikan simbol/huruf & mengubah 08 menjadi 628
 export function sanitizePhone(raw: string): string {
   let cleaned = (raw || "").replace(/[^\d]/g, "");
   if (cleaned.startsWith("08")) {
@@ -240,7 +239,11 @@ class SessionManager {
       runtime.lastError = null;
 
       if (options?.onPairingCode) {
-        await options.onPairingCode(runtime.config.sessionId, formattedCode);
+        try {
+          await options.onPairingCode(runtime.config.sessionId, formattedCode);
+        } catch (e) {
+          console.error(`[Anti-Crash] Error in onPairingCode callback:`, e);
+        }
       }
       return formattedCode;
     } catch (e: unknown) {
@@ -248,7 +251,11 @@ class SessionManager {
       runtime.pairingStatus = "failed";
       runtime.lastError = errorMsg;
       if (options?.onFailed) {
-        await options.onFailed(runtime.config.sessionId, runtime.lastError);
+        try {
+          await options.onFailed(runtime.config.sessionId, runtime.lastError);
+        } catch (err) {
+          console.error(`[Anti-Crash] Error in onFailed callback:`, err);
+        }
       }
       throw e;
     }
@@ -278,6 +285,7 @@ class SessionManager {
       syncFullHistory: false,
       defaultQueryTimeoutMs: 30_000,
       keepAliveIntervalMs: 25_000,
+      getMessage: async () => { return { conversation: 'hello' } } // Mencegah crash jika buffer pesan hilang
     });
 
     sock.ev.on("creds.update", saveCreds);
@@ -307,7 +315,11 @@ class SessionManager {
         runtime.lastError = null;
 
         if (options?.onConnected) {
-          await options.onConnected(config.sessionId);
+          try {
+            await options.onConnected(config.sessionId);
+          } catch (e) {
+            console.error(`[Anti-Crash] Error in onConnected callback:`, e);
+          }
         }
       }
 
@@ -322,7 +334,13 @@ class SessionManager {
         if (isLoggedOut) {
           runtime.pairingStatus = "logged_out";
           runtime.lastError = "Logged out dari perangkat";
-          if (options?.onFailed) await options.onFailed(config.sessionId, runtime.lastError);
+          if (options?.onFailed) {
+            try {
+              await options.onFailed(config.sessionId, runtime.lastError);
+            } catch (e) {
+              console.error(`[Anti-Crash] Error in onFailed callback:`, e);
+            }
+          }
           await this.deleteSession(config.sessionId);
           return;
         }
@@ -442,7 +460,7 @@ class SessionManager {
 }
 
 /* =========================================================
- * Core Bulk Checker (EVALUASI ANTI-SPAM & RAW QUERY)
+ * Core Bulk Checker
  * ======================================================= */
 
 async function checkSingleNumber(
@@ -452,10 +470,9 @@ async function checkSingleNumber(
 ): Promise<NumberCheckDetail> {
   const phone = sanitizePhone(rawPhone);
   const jid = toJid(phone);
-  const outputPhone = "+" + phone; // OUTPUT: Tambahkan tanda '+'
+  const outputPhone = "+" + phone;
 
   try {
-    // 1. Cek terdaftar
     const waCheck = await withTimeout(sock.onWhatsApp(jid), timeoutMs, "onWhatsApp timeout");
     const isRegistered = Array.isArray(waCheck) && waCheck.length > 0 && Boolean(waCheck[0]?.exists);
 
@@ -465,7 +482,6 @@ async function checkSingleNumber(
 
     await sleep(randomBetween(500, 1000));
 
-    // 2. Mengambil BIO menggunakan RAW XML Query untuk akurasi tinggi
     let bio: string | null = null;
     try {
       const statusNode = await withTimeout(
@@ -481,13 +497,10 @@ async function checkSingleNumber(
       if (statusChild && statusChild.content) {
         bio = Buffer.isBuffer(statusChild.content) ? statusChild.content.toString() : String(statusChild.content);
       }
-    } catch (e) {
-      // Ignore 401/404
-    }
+    } catch (e) {}
 
     await sleep(randomBetween(500, 1000));
 
-    // 3. Mengecek Akun Bisnis & Meta menggunakan RAW XML Query
     let type: "business" | "regular" | "unknown" = "regular";
     let businessName: string | null = null;
     let verifiedName: string | null = null;
@@ -518,9 +531,7 @@ async function checkSingleNumber(
           isMetaVerified = Boolean(verifiedName) || labelText.includes("meta verified") || labelText.includes("verified");
           isOfficialBusinessAccount = labelText.includes("official business account") || labelText.includes("oba");
       }
-    } catch { 
-      // Ignore 404 (regular account)
-    }
+    } catch {}
 
     return { phone: outputPhone, jid, isRegistered: true, bio, type, businessName, verifiedName, isMetaVerified, isOfficialBusinessAccount, verificationLabel };
   } catch (error: unknown) {
@@ -545,13 +556,18 @@ async function runBulkCheck(
   const maxBatchDelayMs = opts?.maxBatchDelayMs ?? 3000;
   const perNumberTimeoutMs = opts?.perNumberTimeoutMs ?? 10000;
 
-  // Sanitasi via Engine sebelum memproses
   const cleanNumbers = phoneNumbersArray.map(sanitizePhone).filter(Boolean);
   const batches = chunkArray(cleanNumbers, batchSize);
   const details: NumberCheckDetail[] = [];
   const limit = pLimit(concurrencyPerBatch);
 
   for (let i = 0; i < batches.length; i++) {
+    // CIRCUIT BREAKER: Hentikan sisa antrean jika tiba-tiba WhatsApp putus, cegah crash Node.js
+    if (!runtime.isConnected) {
+      console.warn(`[Circuit Breaker] Koneksi WA terputus di tengah proses. Menghentikan ${batches.length - i} batch yang tersisa secara elegan.`);
+      break; 
+    }
+
     const batch = batches[i];
     const batchResults = await Promise.all(
       batch.map((phone) =>
@@ -562,7 +578,7 @@ async function runBulkCheck(
     );
     details.push(...batchResults);
     
-    if (i < batches.length - 1) {
+    if (i < batches.length - 1 && runtime.isConnected) {
       await sleep(randomBetween(minBatchDelayMs, maxBatchDelayMs));
     }
   }
