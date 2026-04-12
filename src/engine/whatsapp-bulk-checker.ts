@@ -2,8 +2,8 @@ import makeWASocket, {
   DisconnectReason,
   fetchLatestBaileysVersion,
   useMultiFileAuthState,
-  WABusinessProfile,
   WASocket,
+  getBinaryNodeChild,
 } from "@whiskeysockets/baileys";
 import pLimit from "p-limit";
 import P from "pino";
@@ -127,7 +127,7 @@ export interface SessionPairingInfo {
  * Utils
  * ======================================================= */
 
-const logger = P({ level: "silent" }); // Kurangi log noise dari Baileys
+const logger = P({ level: "silent" });
 
 const SESSION_ROOT = path.join(process.cwd(), "sessions");
 if (!fs.existsSync(SESSION_ROOT)) fs.mkdirSync(SESSION_ROOT, { recursive: true });
@@ -143,12 +143,17 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
   return out;
 }
 
-function sanitizePhone(raw: string): string {
-  return (raw || "").replace(/[^\d]/g, "");
+// FORMAT INPUT: Mengabaikan simbol/huruf & mengubah 08 menjadi 628
+export function sanitizePhone(raw: string): string {
+  let cleaned = (raw || "").replace(/[^\d]/g, "");
+  if (cleaned.startsWith("08")) {
+    cleaned = "628" + cleaned.substring(2);
+  }
+  return cleaned;
 }
 
 function toJid(phone: string): string {
-  return `${sanitizePhone(phone)}@s.whatsapp.net`;
+  return `${phone}@s.whatsapp.net`;
 }
 
 async function withTimeout<T>(
@@ -169,31 +174,6 @@ async function withTimeout<T>(
   } finally {
     if (timeoutHandle) clearTimeout(timeoutHandle);
   }
-}
-
-function parseBusinessVerification(profile: unknown): {
-  businessName: string | null;
-  verifiedName: string | null;
-  isMetaVerified: boolean;
-  isOfficialBusinessAccount: boolean;
-  verificationLabel: string | null;
-} {
-  const p = (profile ?? {}) as Record<string, unknown>;
-  const businessName = (p.description as string | undefined) ?? (p.businessName as string | undefined) ?? (p.name as string | undefined) ?? null;
-  const verifiedName = (p.verified_name as string | undefined) ?? (p.verifiedName as string | undefined) ?? ((p.profileOptions as Record<string, unknown> | undefined)?.verified_name as string | undefined) ?? null;
-  const rawLabel = (p.verificationLabel as string | undefined) ?? (p.verified_level as string | undefined) ?? ((p.profileOptions as Record<string, unknown> | undefined)?.verificationLabel as string | undefined) ?? ((p.profileOptions as Record<string, unknown> | undefined)?.verified_level as string | undefined) ?? null;
-  
-  const labelText = rawLabel ? String(rawLabel).toLowerCase() : "";
-  const isMetaVerified = Boolean(verifiedName) || labelText.includes("meta verified") || labelText.includes("verified");
-  const isOfficialBusinessAccount = labelText.includes("official business account") || labelText.includes("oba") || Boolean(p.isOfficialBusinessAccount) || Boolean(p.officialBusinessAccount);
-
-  return {
-    businessName: businessName ? String(businessName) : null,
-    verifiedName: verifiedName ? String(verifiedName) : null,
-    isMetaVerified,
-    isOfficialBusinessAccount,
-    verificationLabel: rawLabel ? String(rawLabel) : null,
-  };
 }
 
 /* =========================================================
@@ -252,16 +232,12 @@ class SessionManager {
     runtime.pairingAttempts += 1;
 
     try {
-      console.log(`⏳ [DEBUG] Meminta kode pairing untuk ${runtime.pairingPhone}...`);
       const rawCode = await runtime.sock.requestPairingCode(runtime.pairingPhone);
-      
-      // FORMAT KODE: Pisahkan dengan tanda strip (-) di tengah agar mudah dibaca
       const formattedCode = rawCode?.match(/.{1,4}/g)?.join('-') || rawCode;
       
       runtime.pairingCode = formattedCode;
       runtime.pairingStatus = "code_sent";
       runtime.lastError = null;
-      console.log(`✅ [DEBUG] Kode didapat: ${formattedCode}`);
 
       if (options?.onPairingCode) {
         await options.onPairingCode(runtime.config.sessionId, formattedCode);
@@ -269,8 +245,6 @@ class SessionManager {
       return formattedCode;
     } catch (e: unknown) {
       const errorMsg = e instanceof Error ? e.message : JSON.stringify(e);
-      console.error(`❌ [DEBUG] Gagal meminta kode:`, errorMsg);
-
       runtime.pairingStatus = "failed";
       runtime.lastError = errorMsg;
       if (options?.onFailed) {
@@ -302,8 +276,8 @@ class SessionManager {
       markOnlineOnConnect: false,
       generateHighQualityLinkPreview: false,
       syncFullHistory: false,
-      defaultQueryTimeoutMs: 30_000, // Timeout ditingkatkan agar lebih toleran
-      keepAliveIntervalMs: 25_000,   // Ping rutin untuk menjaga sesi tetap hidup
+      defaultQueryTimeoutMs: 30_000,
+      keepAliveIntervalMs: 25_000,
     });
 
     sock.ev.on("creds.update", saveCreds);
@@ -331,7 +305,6 @@ class SessionManager {
         runtime.pairingCode = null;
         runtime.pairingStatus = "connected";
         runtime.lastError = null;
-        console.log(`✅ [${config.sessionId}] Terhubung stabil.`);
 
         if (options?.onConnected) {
           await options.onConnected(config.sessionId);
@@ -347,7 +320,6 @@ class SessionManager {
         runtime.lastDisconnectCode = statusCode;
 
         if (isLoggedOut) {
-          console.warn(`🛑 [${config.sessionId}] Perangkat Logged Out. Sesi dihapus.`);
           runtime.pairingStatus = "logged_out";
           runtime.lastError = "Logged out dari perangkat";
           if (options?.onFailed) await options.onFailed(config.sessionId, runtime.lastError);
@@ -355,13 +327,9 @@ class SessionManager {
           return;
         }
 
-        // AUTO RECONNECT AGRESSIVE UNTUK MENJAGA STABILITAS SESI (Selama bukan log out manual)
-        console.log(`🔄 [${config.sessionId}] Sesi terputus (Code: ${statusCode}). Melakukan reconnect otomatis...`);
         this.sessions.delete(config.sessionId); 
-        
-        // Jeda waktu yang eksponensial/acak untuk menghindari deteksi spam restart
         setTimeout(() => {
-            this.initSession(config, options).catch(e => console.error("Auto-restart error:", e));
+            this.initSession(config, options).catch(() => {});
         }, randomBetween(3000, 7000));
       }
     });
@@ -474,7 +442,7 @@ class SessionManager {
 }
 
 /* =========================================================
- * Core Bulk Checker (EVALUASI ANTI-SPAM & AKURASI DATA)
+ * Core Bulk Checker (EVALUASI ANTI-SPAM & RAW QUERY)
  * ======================================================= */
 
 async function checkSingleNumber(
@@ -484,37 +452,42 @@ async function checkSingleNumber(
 ): Promise<NumberCheckDetail> {
   const phone = sanitizePhone(rawPhone);
   const jid = toJid(phone);
+  const outputPhone = "+" + phone; // OUTPUT: Tambahkan tanda '+'
 
   try {
-    // 1. Cek apakah nomor terdaftar
+    // 1. Cek terdaftar
     const waCheck = await withTimeout(sock.onWhatsApp(jid), timeoutMs, "onWhatsApp timeout");
     const isRegistered = Array.isArray(waCheck) && waCheck.length > 0 && Boolean(waCheck[0]?.exists);
 
     if (!isRegistered) {
-      return { phone, jid, isRegistered: false, bio: null, type: "unknown", businessName: null, verifiedName: null, isMetaVerified: false, isOfficialBusinessAccount: false, verificationLabel: null };
+      return { phone: outputPhone, jid, isRegistered: false, bio: null, type: "unknown", businessName: null, verifiedName: null, isMetaVerified: false, isOfficialBusinessAccount: false, verificationLabel: null };
     }
 
-    // JEDA ANTI-SPAM PENTING: Mencegah Rate-Limit WhatsApp yang menyebabkan Bio kosong (0)
     await sleep(randomBetween(500, 1000));
 
-    // 2. Mengambil BIO (Status)
+    // 2. Mengambil BIO menggunakan RAW XML Query untuk akurasi tinggi
     let bio: string | null = null;
     try {
-      const statusResult = await withTimeout(sock.fetchStatus(jid), timeoutMs, "fetchStatus timeout");
-      if (typeof statusResult === "string") {
-        bio = statusResult;
-      } else if (statusResult && typeof statusResult === "object") {
-        const maybeObj = statusResult as { status?: unknown };
-        if (typeof maybeObj.status === "string") bio = maybeObj.status;
+      const statusNode = await withTimeout(
+        sock.query({
+            tag: 'iq',
+            attrs: { to: 's.whatsapp.net', type: 'get', xmlns: 'status' },
+            content: [{ tag: 'status', attrs: { jid } }]
+        }), 
+        timeoutMs, "fetchStatus timeout"
+      );
+      
+      const statusChild = getBinaryNodeChild(statusNode, 'status');
+      if (statusChild && statusChild.content) {
+        bio = Buffer.isBuffer(statusChild.content) ? statusChild.content.toString() : String(statusChild.content);
       }
-    } catch (e: unknown) {
-       // Abaikan error 401 (Privasi Bio Tertutup) atau 404 (Tidak Punya Bio)
+    } catch (e) {
+      // Ignore 401/404
     }
 
-    // JEDA ANTI-SPAM PENTING
     await sleep(randomBetween(500, 1000));
 
-    // 3. Mengecek Akun Bisnis & Meta Verified
+    // 3. Mengecek Akun Bisnis & Meta menggunakan RAW XML Query
     let type: "business" | "regular" | "unknown" = "regular";
     let businessName: string | null = null;
     let verifiedName: string | null = null;
@@ -523,23 +496,35 @@ async function checkSingleNumber(
     let verificationLabel: string | null = null;
 
     try {
-      const profile = (await withTimeout(sock.getBusinessProfile(jid), timeoutMs, "getBusinessProfile timeout")) as WABusinessProfile | null;
-      if (profile) {
-        type = "business";
-        const parsed = parseBusinessVerification(profile);
-        businessName = parsed.businessName;
-        verifiedName = parsed.verifiedName;
-        isMetaVerified = parsed.isMetaVerified;
-        isOfficialBusinessAccount = parsed.isOfficialBusinessAccount;
-        verificationLabel = parsed.verificationLabel;
+      const bizNode = await withTimeout(
+          sock.query({
+            tag: 'iq',
+            attrs: { to: 's.whatsapp.net', type: 'get', xmlns: 'w:biz' },
+            content: [{ tag: 'business_profile', attrs: { v: '116' }, content: [{ tag: 'profile', attrs: { jid } }] }]
+          }), 
+          timeoutMs, "getBusinessProfile timeout"
+      );
+
+      const profileChild = getBinaryNodeChild(getBinaryNodeChild(bizNode, 'business_profile'), 'profile');
+      if (profileChild && profileChild.attrs) {
+          type = "business";
+          const attrs = profileChild.attrs;
+          
+          businessName = attrs.name || null;
+          verifiedName = attrs.verified_name || null;
+          verificationLabel = attrs.verified_level || null;
+          
+          const labelText = String(verificationLabel).toLowerCase();
+          isMetaVerified = Boolean(verifiedName) || labelText.includes("meta verified") || labelText.includes("verified");
+          isOfficialBusinessAccount = labelText.includes("official business account") || labelText.includes("oba");
       }
     } catch { 
-      // Akan error 404 jika bukan akun bisnis, diabaikan (dianggap akun regular)
+      // Ignore 404 (regular account)
     }
 
-    return { phone, jid, isRegistered: true, bio, type, businessName, verifiedName, isMetaVerified, isOfficialBusinessAccount, verificationLabel };
+    return { phone: outputPhone, jid, isRegistered: true, bio, type, businessName, verifiedName, isMetaVerified, isOfficialBusinessAccount, verificationLabel };
   } catch (error: unknown) {
-    return { phone, jid, isRegistered: false, bio: null, type: "unknown", businessName: null, verifiedName: null, isMetaVerified: false, isOfficialBusinessAccount: false, verificationLabel: null, error: error instanceof Error ? error.message : "Timeout" };
+    return { phone: outputPhone, jid, isRegistered: false, bio: null, type: "unknown", businessName: null, verifiedName: null, isMetaVerified: false, isOfficialBusinessAccount: false, verificationLabel: null, error: error instanceof Error ? error.message : "Timeout" };
   }
 }
 
@@ -554,14 +539,13 @@ async function runBulkCheck(
 
   const startedAt = new Date();
   
-  // MENGURANGI BEBAN PARALEL AGAR DATA AKURAT & TIDAK CRASH
-  // Proses berjalan lebih stabil (batch lebih kecil tapi konsisten)
   const batchSize = opts?.batchSize ?? 3;
-  const concurrencyPerBatch = opts?.concurrencyPerBatch ?? 1; // Memastikan request WA murni sekuensial
+  const concurrencyPerBatch = opts?.concurrencyPerBatch ?? 1; 
   const minBatchDelayMs = opts?.minBatchDelayMs ?? 1500;
   const maxBatchDelayMs = opts?.maxBatchDelayMs ?? 3000;
   const perNumberTimeoutMs = opts?.perNumberTimeoutMs ?? 10000;
 
+  // Sanitasi via Engine sebelum memproses
   const cleanNumbers = phoneNumbersArray.map(sanitizePhone).filter(Boolean);
   const batches = chunkArray(cleanNumbers, batchSize);
   const details: NumberCheckDetail[] = [];
@@ -578,7 +562,6 @@ async function runBulkCheck(
     );
     details.push(...batchResults);
     
-    // Istirahat antar batch agar server WA bernapas
     if (i < batches.length - 1) {
       await sleep(randomBetween(minBatchDelayMs, maxBatchDelayMs));
     }
