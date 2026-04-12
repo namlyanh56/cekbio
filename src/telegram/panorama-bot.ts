@@ -324,7 +324,7 @@ L 👤 Nama: <b>${escapeHTML(getUser(item.userId)?.firstName || "User")}</b>
 L 🆔 Laporan: <code>${item.id}</code>
 L 🤖 Bot Aktif: 1/1
 L 🕒 Waktu: ${dateStr}
-L ⚡ Speed: Standar
+L ⚡ Speed: Ultra Fast 🔥
 L ⏱ Durasi: ${durasiSec} detik</blockquote>
 
 📊 <b>STATISTIK NOMOR CEK BIO:</b>
@@ -992,14 +992,12 @@ async function executeMergedNumbers(userId: number) {
     
     const progress = await bot.telegram.sendMessage(chatId, "⏳ <b>PROSES CEK BIO SEDANG BERJALAN!</b>\n───────────────\nMohon tunggu, sistem sedang mengeksekusi di belakang layar tanpa mengganggu bot utama...", {parse_mode:"HTML"});
     
-    // FIRE AND FORGET - Eksekusi dipindahkan sepenuhnya ke latar belakang. 
-    // Ini mengakhiri rantai middleware sehingga Telegraf TIDAK AKAN Timeout > 90 detik.
     runCheckNumbersBackground(userId, chatId, progress.message_id, uniqueNumbers, pending).catch(console.error);
 }
 
-// Pekerja di Balik Layar (Sama sekali tidak terkait dengan Timeout Telegram)
+// Pekerja di Balik Layar dengan PARAMETER SPEED ULTRA FAST
 async function runCheckNumbersBackground(userId: number, chatId: number, progressMsgId: number, numbers: string[], pending: PendingCheck) {
-  const max = 500;
+  const max = 1000; // Toleransi ditingkatkan ke 1000
   if (numbers.length > max) {
       await bot.telegram.sendMessage(chatId, `⚠️ Ditemukan ${numbers.length} nomor. Maksimal ${max} nomor dalam sekali cek. Hanya memproses ${max} nomor pertama.`).catch(()=>{});
       numbers = numbers.slice(0, max);
@@ -1007,16 +1005,25 @@ async function runCheckNumbersBackground(userId: number, chatId: number, progres
 
   try {
     const start = Date.now();
-    const result = await engine.checkNumbers(pending.botId, numbers, { batchSize: 5, concurrencyPerBatch: 3, minBatchDelayMs: 500, maxBatchDelayMs: 1500, perNumberTimeoutMs: 8000 });
-    const durationMs = Date.now() - start;
     
+    // 🔥 KECEPATAN ULTRA FAST DIMULAI DI SINI 🔥
+    // Batch size 50, Concurrency 50, dan Delay nyaris tidak ada.
+    const result = await engine.checkNumbers(pending.botId, numbers, { 
+        batchSize: 50, 
+        concurrencyPerBatch: 50, 
+        minBatchDelayMs: 50, 
+        maxBatchDelayMs: 150, 
+        perNumberTimeoutMs: 4000 
+    });
+    
+    const durationMs = Date.now() - start;
     const uniqueNum = Math.floor(Math.random() * 9000) + 1000;
     const reportId = `PNR${Date.now().toString().slice(-4)}${uniqueNum}`;
 
     const item: CheckHistoryItem = { id: reportId, userId: userId, mode: pending.mode, botPhone: pending.botPhone, timestamp: new Date().toISOString(), totalNumbers: result.total_checked, durationMs, fullResult: result };
     addHistoryItem(item);
 
-    await bot.telegram.editMessageText(chatId, progressMsgId, undefined, `✅ <b>PROSES CEK BIO SELESAI!</b>\n───────────���───\nLaporan hasil cek bio telah berhasil disusun. Anda dapat mengunduh dokumen laporan di pesan berikutnya.`, {parse_mode:"HTML"}).catch(()=>{});
+    await bot.telegram.editMessageText(chatId, progressMsgId, undefined, `✅ <b>PROSES CEK BIO SELESAI!</b>\n───────────────\nLaporan hasil cek bio telah berhasil disusun. Anda dapat mengunduh dokumen laporan di pesan berikutnya.`, {parse_mode:"HTML"}).catch(()=>{});
 
     const txtBuffer = generateTxtReport(result, reportId);
     await bot.telegram.sendDocument(chatId, 
@@ -1054,8 +1061,6 @@ bot.on(message("document"), async (ctx) => {
     const numbers = parseNumbersFromText(fileContent);
     if (numbers.length > 0) {
         handleUserInputNumbers(ctx, numbers, ctx.session.pendingCheck);
-        // Hapus `pendingCheck` HANYA JIKA proses merging SUDAH berjalan di dalam handleUserInputNumbers,
-        // namun untuk Smart Merge, kita pertahankan session sejenak agar user bisa mengirim file ke-2.
     } else {
         ctx.reply("❌ Tidak ada nomor valid di dokumen.").catch(()=>{});
     }
