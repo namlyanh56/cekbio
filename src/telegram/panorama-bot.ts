@@ -107,7 +107,6 @@ function loadConfig(): SystemConfig {
   try {
     return JSON.parse(fs.readFileSync(CONFIG_FILE, "utf-8"));
   } catch (e) {
-    console.error("Config JSON corrupt, menggunakan default.");
     return defaultCfg;
   }
 }
@@ -209,18 +208,15 @@ async function createExcelBuffer(numbers: string[], title: string): Promise<Buff
 
 /* ===================== ANTI-CRASH UI WRAPPERS ===================== */
 
-// Pembungkus ini memastikan jika URL gambar mati/error, bot tetap akan mengirim text dan tidak hang.
 async function safeReplyWithPhoto(ctx: BotContext, caption: string, keyboard: any = {}) {
   const config = loadConfig();
   try {
     return await ctx.replyWithPhoto(config.bgImage, { caption, parse_mode: "HTML", ...keyboard });
   } catch (e) {
-    console.error("[Anti-Crash] Gagal mengirim foto latar. Fallback menggunakan pesan teks.");
     return await ctx.reply(caption, { parse_mode: "HTML", ...keyboard });
   }
 }
 
-// Jika sebelumnya message adalah text (karena fallback), edit caption akan gagal. Fungsi ini mencegah hal itu.
 async function safeEditCaption(ctx: BotContext, caption: string, keyboard: any = {}) {
   try {
     return await ctx.editMessageCaption(caption, { parse_mode: "HTML", ...keyboard });
@@ -428,7 +424,7 @@ bot.hears("⚙️ Navigator Admin", async (ctx) => {
   ctx.session.adminAction = undefined; 
   
   const config = loadConfig();
-  const text = `⚙️ <b>NAVIGATOR ADMIN</b>\n───────────────\nSelamat datang di Panel Admin. Pilih menu kendali sistem di bawah ini:\n\n🛠 <b>Status Maintenance:</b> ${config.maintenanceMode ? "🔴 AKTIF (User Terblokir)" : "🟢 NONAKTIF (Normal)"}\n🌍 <b>Sender Global:</b> ${config.globalSenderPhone ? `<code>${config.globalSenderPhone}</code>` : "Belum Diatur"}`;
+  const text = `⚙️ <b>NAVIGATOR ADMIN</b>\n──────────────���\nSelamat datang di Panel Admin. Pilih menu kendali sistem di bawah ini:\n\n🛠 <b>Status Maintenance:</b> ${config.maintenanceMode ? "🔴 AKTIF (User Terblokir)" : "🟢 NONAKTIF (Normal)"}\n🌍 <b>Sender Global:</b> ${config.globalSenderPhone ? `<code>${config.globalSenderPhone}</code>` : "Belum Diatur"}`;
   
   const kbd = Markup.inlineKeyboard([
     [Markup.button.callback("👥 Manajemen Pengguna", "admin_users"), Markup.button.callback("🌍 Sender Global", "admin_global")],
@@ -920,7 +916,6 @@ bot.action(/^vcat_([^_]+)_([^_]+)(?:_(\d+))?$/, async (ctx) => {
     }
     kbd.push([Markup.button.callback("◁ Kembali", `vsum_${reportId}`)]);
 
-    // Untuk pagination laporan detail tidak perlu aman karena awalnya text dari dokumen, biarkan jalan native editMessageCaption/text
     try { await ctx.editMessageCaption(text, { parse_mode: "HTML", ...Markup.inlineKeyboard(kbd) }); } 
     catch { await ctx.editMessageText(text, { parse_mode: "HTML", ...Markup.inlineKeyboard(kbd) }).catch(()=>{}); }
   } catch (error) {}
@@ -963,18 +958,48 @@ bot.action(/^dlcat_([^_]+)_(.+?)_(.+)$/, async (ctx) => {
   } catch(e){}
 });
 
-/* ===================== LOGIC CEK BIO ===================== */
+/* ===================== LOGIC SMART MERGE CEK BIO ===================== */
 
-async function handleCheckNumbers(ctx: BotContext, textContent: string) {
-  if (!ctx.session.pendingCheck) return;
-  const pending = ctx.session.pendingCheck;
-  ctx.session.pendingCheck = undefined;
+const userPayloadBuffer: Record<number, { timer: NodeJS.Timeout, numbers: string[], pending: PendingCheck, ctx: BotContext }> = {};
 
-  const numbers = parseNumbersFromText(textContent);
-  if (!numbers.length) return ctx.reply("❌ Tidak ada nomor valid yang ditemukan.");
+function handleUserInputNumbers(ctx: BotContext, numbers: string[], pending: PendingCheck) {
+    const userId = ctx.from!.id;
+    if (!userPayloadBuffer[userId]) {
+        ctx.reply("⏳ Menerima nomor... (Bot akan memulai proses dalam 3 detik. Silakan kirim pesan nomor lagi jika ada tambahan)").catch(()=>{});
+        userPayloadBuffer[userId] = {
+            timer: setTimeout(() => executeMergedNumbers(userId), 3000),
+            numbers: [...numbers],
+            pending: pending,
+            ctx: ctx
+        };
+    } else {
+        clearTimeout(userPayloadBuffer[userId].timer);
+        userPayloadBuffer[userId].numbers.push(...numbers);
+        userPayloadBuffer[userId].ctx = ctx; 
+        userPayloadBuffer[userId].timer = setTimeout(() => executeMergedNumbers(userId), 3000);
+    }
+}
 
-  const max = 500; 
-  if (numbers.length > max) return ctx.reply(`❌ Ditemukan ${numbers.length} nomor. Maksimal ${max} nomor dalam sekali cek.`);
+async function executeMergedNumbers(userId: number) {
+    const payload = userPayloadBuffer[userId];
+    delete userPayloadBuffer[userId];
+    if (!payload) return;
+
+    const { numbers, pending, ctx } = payload;
+    const uniqueNumbers = [...new Set(numbers)];
+    ctx.session.pendingCheck = undefined;
+
+    // Jalankan eksekusi ke background agar tidak memicu Timeout Telegraf
+    runCheckNumbersBackground(ctx, uniqueNumbers, pending).catch(console.error);
+}
+
+// Background Function untuk Cek Nomor
+async function runCheckNumbersBackground(ctx: BotContext, numbers: string[], pending: PendingCheck) {
+  const max = 500;
+  if (numbers.length > max) {
+      await ctx.reply(`⚠️ Ditemukan ${numbers.length} nomor. Maksimal ${max} nomor dalam sekali cek. Hanya memproses ${max} nomor pertama.`).catch(()=>{});
+      numbers = numbers.slice(0, max);
+  }
 
   const progress = await ctx.reply("⏳ <b>PROSES CEK BIO SEDANG BERJALAN!</b>\n───────────────\nMohon tunggu, sistem sedang memeriksa daftar nomor secara detail dan akurat...", {parse_mode:"HTML"});
   
@@ -997,7 +1022,6 @@ async function handleCheckNumbers(ctx: BotContext, textContent: string) {
       {
         caption: getSummaryCaption(item),
         parse_mode: "HTML",
-        message_effect_id: "5046509860389126442", 
         ...getSummaryKeyboard(item)
       } as any
     );
@@ -1009,7 +1033,6 @@ async function handleCheckNumbers(ctx: BotContext, textContent: string) {
 
 /* ===================== MESSAGE HANDLERS ===================== */
 
-// Menerima file/dokumen (TXT)
 bot.on(message("document"), async (ctx) => {
   if (!ctx.session.pendingCheck) return;
 
@@ -1018,35 +1041,38 @@ bot.on(message("document"), async (ctx) => {
     return ctx.reply("❌ Silakan kirim file dengan format .txt");
   }
 
-  const waitMsg = await ctx.reply("⏳ Membaca dan memproses file dokumen Anda...");
+  const waitMsg = await ctx.reply("⏳ Membaca file dokumen...");
   try {
     const fileUrl = await ctx.telegram.getFileLink(doc.file_id);
     const response = await axios.get(fileUrl.href);
     const fileContent = String(response.data);
     await ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(()=>{});
-    await handleCheckNumbers(ctx, fileContent);
+    
+    const numbers = parseNumbersFromText(fileContent);
+    if (numbers.length > 0) {
+        handleUserInputNumbers(ctx, numbers, ctx.session.pendingCheck);
+    } else {
+        ctx.reply("❌ Tidak ada nomor valid di dokumen.").catch(()=>{});
+    }
   } catch (e) {
     await ctx.telegram.editMessageText(ctx.chat.id, waitMsg.message_id, undefined, "❌ Gagal membaca atau memproses file dokumen.").catch(()=>{});
   }
 });
 
-// Menerima upload foto langsung (Galeri) khusus untuk ganti background
 bot.on(message("photo"), async (ctx) => {
   const userId = ctx.from.id;
   if (ctx.session.adminAction === "bg" && ADMIN_IDS.includes(userId)) {
     ctx.session.adminAction = undefined;
-    // Mengambil file ID kualitas tertinggi yang diupload dari galeri
     const fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
     
     const config = loadConfig();
-    config.bgImage = fileId; // Simpan file_id ke config
+    config.bgImage = fileId; 
     saveConfig(config);
     
     return ctx.reply("✅ <b>Background berhasil diubah!</b>\nFoto dari galeri Anda telah terpasang ke seluruh sistem.", {parse_mode: "HTML"});
   }
 });
 
-// Menerima input Teks (Command / URL / Nomor)
 bot.on(message("text"), async (ctx) => {
   const userId = ctx.from.id;
   const text = ctx.message.text.trim();
@@ -1137,7 +1163,12 @@ bot.on(message("text"), async (ctx) => {
 
   // STATE: USER SENDING TEXT NUMBERS TO CHECK
   if (ctx.session.pendingCheck) {
-    await handleCheckNumbers(ctx, text);
+    const numbers = parseNumbersFromText(text);
+    if (numbers.length > 0) {
+        handleUserInputNumbers(ctx, numbers, ctx.session.pendingCheck);
+    } else {
+        ctx.reply("❌ Tidak ada nomor valid yang ditemukan.").catch(()=>{});
+    }
   }
 });
 
