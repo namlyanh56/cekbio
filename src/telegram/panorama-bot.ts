@@ -3,12 +3,14 @@ import { message } from "telegraf/filters";
 import ExcelJS from "exceljs";
 import fs from "node:fs";
 import path from "node:path";
+import axios from "axios";
 import {
   WhatsAppBulkCheckerEngine,
   SessionConfig,
   InitSessionOptions,
   CheckSummary,
   NumberCheckDetail,
+  sanitizePhone
 } from "../engine/whatsapp-bulk-checker";
 
 /* ===================== TYPES ===================== */
@@ -143,15 +145,12 @@ function getUserHistory(userId: number, limit = 10): CheckHistoryItem[] {
 
 /* ===================== UTILS & EXPORT ===================== */
 
-function sanitizePhone(raw: string): string {
-  return raw.replace(/[^\d]/g, "");
-}
-
+// Menerima raw text dan mengubahnya menjadi array format internasional
 function parseNumbersFromText(text: string): string[] {
   return text
-    .split(/[\n, ]+/)
+    .split(/[\n,]+/)
     .map((x) => sanitizePhone(x))
-    .filter((x) => /^\d{8,15}$/.test(x));
+    .filter((x) => /^\d{8,16}$/.test(x));
 }
 
 function escapeHTML(text: string): string {
@@ -450,7 +449,6 @@ async function startUserBotSession(ctx: Context | null, userId: number, phone: s
 }
 
 async function initAllUserSessions() {
-    console.log("🔄 [STARTUP] Menghubungkan ulang bot-bot yang aktif di database...");
     const users = loadUsers();
     for (const user of users.values()) {
         if (!user.bots) continue;
@@ -546,7 +544,7 @@ bot.action("mode_user", async (ctx) => {
     }
     if (actives.length === 1) {
       ctx.session.pendingCheck = { mode: "user", botId: actives[0].id, botPhone: actives[0].phoneNumber };
-      await ctx.editMessageText("📄 <b>KIRIM DAFTAR NOMOR</b>\n───────────────\nKirim nomor yang ingin dicek (pisahkan dengan spasi/enter, maks 500).", {parse_mode: "HTML"}).catch(() => {});
+      await ctx.editMessageText("📄 <b>KIRIM DAFTAR NOMOR</b>\n───────────────\nKirim nomor yang ingin dicek (teks atau file .txt, maks 500).", {parse_mode: "HTML"}).catch(() => {});
       return;
     }
 
@@ -564,7 +562,7 @@ bot.action(/^select_bot_(.+)$/, async (ctx) => {
     if (!b || !(b.isActive && engine.isSessionConnected(b.id))) return ctx.answerCbQuery("Bot offline", { show_alert: true });
 
     ctx.session.pendingCheck = { mode: "user", botId: b.id, botPhone: b.phoneNumber };
-    await ctx.editMessageText("📄 <b>KIRIM DAFTAR NOMOR</b>\n───────────────\nKirim nomor yang ingin dicek (pisahkan dengan spasi/enter, maks 500).", {parse_mode: "HTML"}).catch(() => {});
+    await ctx.editMessageText("📄 <b>KIRIM DAFTAR NOMOR</b>\n───────────────\nKirim nomor yang ingin dicek (teks atau file .txt, maks 500).", {parse_mode: "HTML"}).catch(() => {});
   } catch(e){}
 });
 
@@ -576,7 +574,7 @@ bot.action("mode_global", async (ctx) => {
       return;
     }
     ctx.session.pendingCheck = { mode: "global", botId: GLOBAL_SESSION_ID };
-    await ctx.editMessageText("📄 <b>KIRIM DAFTAR NOMOR</b>\n───────────────\nKirim nomor yang ingin dicek (maks 500).", {parse_mode:"HTML"}).catch(() => {});
+    await ctx.editMessageText("📄 <b>KIRIM DAFTAR NOMOR</b>\n───────────────\nKirim nomor yang ingin dicek (teks atau file .txt, maks 500).", {parse_mode:"HTML"}).catch(() => {});
   } catch(e){}
 });
 
@@ -612,7 +610,6 @@ bot.action(/^vcat_([^_]+)_([^_]+)(?:_(\d+))?$/, async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
     const { filtered, title } = filterCategory(item.fullResult, cat);
 
-    // PAGINATION LOGIC
     const itemsPerPage = 10;
     const totalPages = Math.ceil(filtered.length / itemsPerPage) || 1;
     const page = Math.min(Math.max(1, parseInt(pageStr) || 1), totalPages);
@@ -634,10 +631,7 @@ bot.action(/^vcat_([^_]+)_([^_]+)(?:_(\d+))?$/, async (ctx) => {
     }
     text += `👇 <i>Pilih aksi di bawah ini:</i>`;
 
-    // KEYBOARD DYNAMIC
     const kbd = [];
-    
-    // 1. Navigation Row (Prev / Next)
     const navRow = [];
     if (page > 1) {
         navRow.push(Markup.button.callback("◀️ Prev", `vcat_${reportId}_${cat}_${page - 1}`));
@@ -647,24 +641,19 @@ bot.action(/^vcat_([^_]+)_([^_]+)(?:_(\d+))?$/, async (ctx) => {
     }
     if (navRow.length > 0) kbd.push(navRow);
 
-    // 2. Download Row
     if (filtered.length > 0) {
         kbd.push([
             Markup.button.callback("📄 Download TXT", `dlcat_${reportId}_${cat}_txt`),
             Markup.button.callback("📊 Download XLSX", `dlcat_${reportId}_${cat}_xlsx`)
         ]);
     }
-
-    // 3. Back Row
     kbd.push([Markup.button.callback("◁ Kembali", `vsum_${reportId}`)]);
 
     await ctx.editMessageCaption(text, {
         parse_mode: "HTML",
         ...Markup.inlineKeyboard(kbd)
-    }).catch((e)=>{ console.log("EditCaption Error:", e.message) });
-  } catch (error) {
-      console.error(error);
-  }
+    }).catch(()=>{});
+  } catch (error) {}
 });
 
 bot.action(/^vsum_([^_]+)$/, async (ctx) => {
@@ -703,17 +692,82 @@ bot.action(/^dlcat_([^_]+)_(.+?)_(.+)$/, async (ctx) => {
   } catch(e){}
 });
 
-/* ===================== MESSAGE HANDLER (TEXT INPUT) ===================== */
+/* ===================== LOGIC CEK BIO ===================== */
 
+async function handleCheckNumbers(ctx: BotContext, textContent: string) {
+  if (!ctx.session.pendingCheck) return;
+  const pending = ctx.session.pendingCheck;
+  ctx.session.pendingCheck = undefined;
+
+  const numbers = parseNumbersFromText(textContent);
+  if (!numbers.length) return ctx.reply("❌ Tidak ada nomor valid yang ditemukan.");
+
+  const max = 500; 
+  if (numbers.length > max) return ctx.reply(`❌ Ditemukan ${numbers.length} nomor. Maksimal ${max} nomor dalam sekali cek.`);
+
+  const progress = await ctx.reply("⏳ <b>PROSES CEK BIO SEDANG BERJALAN!</b>\n───────────────\nMohon tunggu, sistem sedang memeriksa daftar nomor...", {parse_mode:"HTML"});
+  
+  try {
+    const start = Date.now();
+    const result = await engine.checkNumbers(pending.botId, numbers, { batchSize: 5, concurrencyPerBatch: 3, minBatchDelayMs: 500, maxBatchDelayMs: 1500, perNumberTimeoutMs: 8000 });
+    const durationMs = Date.now() - start;
+    
+    const uniqueNum = Math.floor(Math.random() * 9000) + 1000;
+    const reportId = `PNR${Date.now().toString().slice(-4)}${uniqueNum}`;
+
+    const item: CheckHistoryItem = { id: reportId, userId: ctx.from!.id, mode: pending.mode, botPhone: pending.botPhone, timestamp: new Date().toISOString(), totalNumbers: result.total_checked, durationMs, fullResult: result };
+    addHistoryItem(item);
+
+    await ctx.telegram.editMessageText(ctx.chat!.id, progress.message_id, undefined, `✅ <b>PROSES CEK BIO SELESAI!</b>\n───────────────\nLaporan hasil cek bio telah berhasil disusun dan dikirim di bawah ini:`, {parse_mode:"HTML"}).catch(()=>{});
+
+    const txtBuffer = generateTxtReport(result, reportId);
+    await ctx.replyWithDocument(
+      { source: txtBuffer, filename: `PNR_Report_${reportId}_${result.total_checked}Nomor.txt` },
+      {
+        caption: getSummaryCaption(item),
+        parse_mode: "HTML",
+        message_effect_id: "5046509860389126442", 
+        ...getSummaryKeyboard(item)
+      } as any
+    );
+
+  } catch (e: unknown) {
+    await ctx.telegram.editMessageText(ctx.chat!.id, progress.message_id, undefined, `❌ Error: ${e instanceof Error ? e.message : "Unknown error"}`).catch(()=>{});
+  }
+}
+
+/* ===================== MESSAGE HANDLERS ===================== */
+
+// Handle dokumen (.txt)
+bot.on(message("document"), async (ctx) => {
+  if (!ctx.session.pendingCheck) return;
+
+  const doc = ctx.message.document;
+  if (doc.mime_type !== "text/plain" && !doc.file_name?.endsWith(".txt")) {
+    return ctx.reply("❌ Silakan kirim file dengan format .txt");
+  }
+
+  const waitMsg = await ctx.reply("⏳ Membaca file...");
+  try {
+    const fileUrl = await ctx.telegram.getFileLink(doc.file_id);
+    const response = await axios.get(fileUrl.href);
+    const fileContent = String(response.data);
+    await ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(()=>{});
+    await handleCheckNumbers(ctx, fileContent);
+  } catch (e) {
+    await ctx.telegram.editMessageText(ctx.chat.id, waitMsg.message_id, undefined, "❌ Gagal membaca file.").catch(()=>{});
+  }
+});
+
+// Handle input teks
 bot.on(message("text"), async (ctx) => {
   const userId = ctx.from.id;
   const text = ctx.message.text.trim();
 
-  // Add bot flow
   if (ctx.session.waitingForBotNumber) {
     ctx.session.waitingForBotNumber = false;
     const phone = sanitizePhone(text);
-    if (!/^\d{8,15}$/.test(phone)) return ctx.reply("❌ Format nomor salah.");
+    if (!/^\d{8,16}$/.test(phone)) return ctx.reply("❌ Format nomor salah.");
 
     const existing = getUser(userId)?.bots?.find((b) => b.phoneNumber === phone);
     if (existing) {
@@ -732,46 +786,8 @@ bot.on(message("text"), async (ctx) => {
     return;
   }
 
-  // Check Bio Flow
   if (ctx.session.pendingCheck) {
-    const pending = ctx.session.pendingCheck;
-    ctx.session.pendingCheck = undefined;
-
-    const numbers = parseNumbersFromText(text);
-    if (!numbers.length) return ctx.reply("❌ Tidak ada nomor valid.");
-
-    const max = 500; 
-    if (numbers.length > max) return ctx.reply(`❌ Maks ${max} nomor dalam sekali cek.`);
-
-    const progress = await ctx.reply("⏳ <b>PROSES CEK BIO SEDANG BERJALAN!</b>\n───────────────\nMohon tunggu, sistem sedang memeriksa daftar nomor...", {parse_mode:"HTML"});
-    
-    try {
-      const start = Date.now();
-      const result = await engine.checkNumbers(pending.botId, numbers, { batchSize: 5, concurrencyPerBatch: 3, minBatchDelayMs: 500, maxBatchDelayMs: 1500, perNumberTimeoutMs: 8000 });
-      const durationMs = Date.now() - start;
-      
-      const uniqueNum = Math.floor(Math.random() * 9000) + 1000;
-      const reportId = `PNR${Date.now().toString().slice(-4)}${uniqueNum}`;
-
-      const item: CheckHistoryItem = { id: reportId, userId, mode: pending.mode, botPhone: pending.botPhone, timestamp: new Date().toISOString(), totalNumbers: result.total_checked, durationMs, fullResult: result };
-      addHistoryItem(item);
-
-      await ctx.telegram.editMessageText(ctx.chat!.id, progress.message_id, undefined, `✅ <b>PROSES CEK BIO SELESAI!</b>\n───────────────\nLaporan hasil cek bio telah berhasil disusun dan dikirim di bawah ini:`, {parse_mode:"HTML"}).catch(()=>{});
-
-      const txtBuffer = generateTxtReport(result, reportId);
-      await ctx.replyWithDocument(
-        { source: txtBuffer, filename: `PNR_Report_${reportId}_${result.total_checked}Nomor.txt` },
-        {
-          caption: getSummaryCaption(item),
-          parse_mode: "HTML",
-          message_effect_id: "5046509860389126442", 
-          ...getSummaryKeyboard(item)
-        } as any
-      );
-
-    } catch (e: unknown) {
-      await ctx.telegram.editMessageText(ctx.chat!.id, progress.message_id, undefined, `❌ Error: ${e instanceof Error ? e.message : "Unknown error"}`).catch(()=>{});
-    }
+    await handleCheckNumbers(ctx, text);
   }
 });
 
