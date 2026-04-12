@@ -21,6 +21,20 @@ process.on("unhandledRejection", (reason, promise) => {
   console.error("🚨 [ANTI-CRASH] Unhandled Rejection Terdeteksi pada:", promise, "alasan:", reason);
 });
 
+/* ===================== CONFIG & ASSETS ===================== */
+
+const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "YOUR_BOT_TOKEN_HERE";
+const ADMIN_IDS = [process.env.ADMIN_ID ? parseInt(process.env.ADMIN_ID, 10) : 0];
+
+// GANTI URL DI BAWAH INI DENGAN URL FOTO LATAR (BACKGROUND) ANDA
+const BG_IMAGE = "https://placehold.co/800x400/1a1a1a/ff3333.png?text=LANGRIS+CEK+BIO+BOT";
+
+const engine = new WhatsAppBulkCheckerEngine();
+const GLOBAL_SESSION_ID = "panorama_global_sender";
+let globalSessionReady = false;
+
+const pairingMessageTracker: Record<string, number> = {};
+
 /* ===================== TYPES ===================== */
 
 interface PanoramaBot {
@@ -68,17 +82,6 @@ interface SessionData {
 }
 
 type BotContext = Context & { session: SessionData };
-
-/* ===================== CONFIG ===================== */
-
-const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "YOUR_BOT_TOKEN_HERE";
-const ADMIN_IDS = [process.env.ADMIN_ID ? parseInt(process.env.ADMIN_ID, 10) : 0];
-
-const engine = new WhatsAppBulkCheckerEngine();
-const GLOBAL_SESSION_ID = "panorama_global_sender";
-let globalSessionReady = false;
-
-const pairingMessageTracker: Record<string, number> = {};
 
 /* ===================== STORAGE ===================== */
 
@@ -333,7 +336,16 @@ bot.start(async (ctx) => {
     user = { userId, username: ctx.from.username, firstName: ctx.from.first_name, tier: "free", createdAt: new Date().toISOString(), bots: [], lastMode: null };
     saveUser(user);
   }
-  await ctx.reply(generateMainMenuHTML(user), { parse_mode: "HTML", message_effect_id: "5104841245755180586", ...replyKeyboard } as any);
+  
+  await ctx.replyWithPhoto(
+    { url: BG_IMAGE },
+    {
+      caption: generateMainMenuHTML(user),
+      parse_mode: "HTML",
+      message_effect_id: "5104841245755180586", // Efek Api (opsional jika support)
+      ...replyKeyboard
+    } as any
+  );
 });
 
 bot.action("back_main", async (ctx) => {
@@ -341,7 +353,7 @@ bot.action("back_main", async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
     const user = getUser(ctx.from.id);
     if(!user) return;
-    await ctx.editMessageText(generateMainMenuHTML(user), { parse_mode: "HTML" }).catch(() => {});
+    await ctx.editMessageCaption(generateMainMenuHTML(user), { parse_mode: "HTML" }).catch(() => {});
   } catch(e) {}
 });
 
@@ -349,54 +361,70 @@ bot.action("back_main", async (ctx) => {
 
 bot.hears("📱 Cek Bio", async (ctx) => {
   ctx.session.waitingForBotNumber = false; 
-  await ctx.reply("📱 <b>PILIH SENDER CEK BIO</b>\n───────────────\nPilih jalur pengiriman:", {
-    parse_mode: "HTML",
-    ...Markup.inlineKeyboard([
-      [Markup.button.callback("👤 SENDER USER", "mode_user")],
-      [Markup.button.callback("🌍 SENDER GLOBAL", "mode_global")]
-    ]),
-  });
+  const text = `📱 <b>PILIH SENDER CEK BIO</b>\n───────────────\nPilih jalur pengiriman yang ingin Anda gunakan untuk proses pengecekan:\n\n🌍 <b>SENDER GLOBAL</b>\n<blockquote>Menggunakan sistem server pusat. Anda tidak perlu menautkan nomor pribadi. Kecepatan dan antrean bergantung pada kepadatan pengguna global.</blockquote>\n\n👤 <b>SENDER USER (PRIBADI)</b>\n<blockquote>Menggunakan nomor WhatsApp Anda sendiri yang telah ditautkan ke bot. Lebih privat, independen, dan terbebas dari antrean server global.</blockquote>\n\n👇 <i>Silakan pilih sender di bawah ini:</i>`;
+  
+  await ctx.replyWithPhoto(
+    { url: BG_IMAGE },
+    {
+      caption: text,
+      parse_mode: "HTML",
+      ...Markup.inlineKeyboard([
+        [Markup.button.callback("👤 SENDER USER", "mode_user")],
+        [Markup.button.callback("🌍 SENDER GLOBAL", "mode_global")]
+      ])
+    }
+  );
 });
 
 bot.hears("🤖 Daftar Bot", async (ctx) => {
   ctx.session.waitingForBotNumber = false;
   const user = getUser(ctx.from.id);
   if (!user || !user.bots || user.bots.length === 0) {
-    await ctx.reply("📭 <b>Belum ada bot yang ditambahkan.</b>", {
-      parse_mode: "HTML",
-      ...Markup.inlineKeyboard([[Markup.button.callback("➕ Tambah Bot", "menu_tambah_bot")]]),
-    });
+    await ctx.replyWithPhoto(
+      { url: BG_IMAGE },
+      {
+        caption: "📭 <b>Belum ada bot yang ditambahkan.</b>\nSilakan tambahkan nomor terlebih dahulu.",
+        parse_mode: "HTML",
+        ...Markup.inlineKeyboard([[Markup.button.callback("➕ Tambah Bot", "menu_tambah_bot")]])
+      }
+    );
     return;
   }
-  let text = "🤖 <b>DAFTAR BOT USER</b>\n───────────────\n";
+  let text = "🤖 <b>DAFTAR BOT USER</b>\n───────────────\nBerikut adalah daftar nomor bot pribadi Anda:\n\n";
   const keyboard: any[][] = []; 
   for (const b of user.bots) {
     const online = engine.isSessionConnected(b.id);
     text += `• <code>${b.phoneNumber}</code> - ${online ? "✅ Online" : "❌ Offline"} (${b.pairingStatus ?? "idle"})\n`;
     keyboard.push([Markup.button.callback(`⚙️ Kelola ${b.phoneNumber}`, `detail_bot_${b.id}`)]);
   }
-  await ctx.reply(text, { parse_mode: "HTML", ...Markup.inlineKeyboard(keyboard) });
+  await ctx.replyWithPhoto({ url: BG_IMAGE }, { caption: text, parse_mode: "HTML", ...Markup.inlineKeyboard(keyboard) });
 });
 
 bot.hears("📜 Riwayat", async (ctx) => {
   ctx.session.waitingForBotNumber = false;
   const rows = getUserHistory(ctx.from.id, 10);
   if (!rows.length) {
-    await ctx.reply("📭 <b>Belum ada riwayat pengecekan.</b>", {parse_mode: "HTML"});
+    await ctx.replyWithPhoto(
+      { url: BG_IMAGE },
+      { caption: "📭 <b>Belum ada riwayat pengecekan.</b>\nRiwayat akan muncul setelah Anda melakukan Cek Bio.", parse_mode: "HTML" }
+    );
     return;
   }
   const keyboard: any[][] = [];
   rows.forEach((h, i) => {
     keyboard.push([Markup.button.callback(`${i + 1}. ${new Date(h.timestamp).toLocaleString("id-ID")} (${h.totalNumbers} No)`, `history_${h.id}`)]);
   });
-  await ctx.reply("📜 <b>RIWAYAT CEK BIO</b>\n───────────────\nPilih riwayat untuk melihat detail:", { parse_mode: "HTML", ...Markup.inlineKeyboard(keyboard) });
+  await ctx.replyWithPhoto(
+    { url: BG_IMAGE },
+    { caption: "📜 <b>RIWAYAT CEK BIO</b>\n───────────────\nPilih riwayat untuk melihat laporan detail:", parse_mode: "HTML", ...Markup.inlineKeyboard(keyboard) }
+  );
 });
 
 bot.hears("➕ Tambah Bot", async (ctx) => {
   ctx.session.waitingForBotNumber = true;
   ctx.session.pendingCheck = undefined;
-  const text = `➕ <b>TAMBAH BOT USER</b>\n───────────────\n<blockquote>Kirim nomor WhatsApp yang akan dijadikan sender. ”\nPastikan nomor aktif.\n\n<b>Contoh Format:</b>\n6281234567890\n+6281234567890\n+748394834\n2348948394</blockquote>\n<i>Kirim nomor sekarang:</i>`;
-  await ctx.reply(text, { parse_mode: "HTML" });
+  const text = `➕ <b>TAMBAH BOT USER</b>\n───────────────\n<blockquote>Kirim nomor WhatsApp yang akan dijadikan sender. ”\nPastikan nomor aktif dan siap menerima kode pairing.\n\n<b>Contoh Format:</b>\n6281234567890\n+6281234567890\n+748394834\n2348948394</blockquote>\n<i>Kirim nomor sekarang:</i>`;
+  await ctx.replyWithPhoto({ url: BG_IMAGE }, { caption: text, parse_mode: "HTML" });
 });
 
 bot.action("menu_tambah_bot", async (ctx) => {
@@ -404,12 +432,14 @@ bot.action("menu_tambah_bot", async (ctx) => {
     await ctx.answerCbQuery().catch(() => {});
     ctx.session.waitingForBotNumber = true;
     ctx.session.pendingCheck = undefined;
-    await ctx.editMessageText(`➕ <b>TAMBAH BOT USER</b>\n───────────────\n<blockquote>Kirim nomor WhatsApp yang akan dijadikan sender. ”\nPastikan nomor aktif.\n\n<b>Contoh Format:</b>\n6281234567890\n+6281234567890\n+748394834\n2348948394</blockquote>\n<i>Kirim nomor sekarang:</i>`, { parse_mode: "HTML" }).catch(() => {});
+    const text = `➕ <b>TAMBAH BOT USER</b>\n───────────────\n<blockquote>Kirim nomor WhatsApp yang akan dijadikan sender. ”\nPastikan nomor aktif dan siap menerima kode pairing.\n\n<b>Contoh Format:</b>\n6281234567890\n+6281234567890\n+748394834\n2348948394</blockquote>\n<i>Kirim nomor sekarang:</i>`;
+    await ctx.editMessageCaption(text, { parse_mode: "HTML" }).catch(() => {});
   } catch(e) {}
 });
 
 /* ===================== ADD BOT & PAIRING ===================== */
 
+// PENTING: Proses pairing, loading, dan error WA menggunakan TEXT biasa (tanpa foto) agar tidak spam dan mencegah error API.
 async function startUserBotSession(ctx: Context | null, userId: number, phone: string, sessionId: string) {
     const config: SessionConfig = { sessionId, senderType: "user_sender", label: `User ${userId}` };
     const options: InitSessionOptions = {
@@ -417,7 +447,7 @@ async function startUserBotSession(ctx: Context | null, userId: number, phone: s
       onPairingCode: async (_sid, code) => {
         upsertBot(userId, { id: sessionId, phoneNumber: phone, isActive: false, addedAt: new Date().toISOString(), pairingStatus: "code_sent", lastPairingCode: code, lastPairingAt: new Date().toISOString(), lastError: null });
         if (ctx) {
-            const text = `🔐 <b>KODE PAIRING</b>\n───────────────\n👤 <b>Sender:</b> <code>${phone}</code>\n\nKode pairing: <code>${code}</code>`;
+            const text = `🔐 <b>KODE PAIRING</b>\n───────────────\n👤 <b>Sender:</b> <code>${phone}</code>\n\nKode pairing: <code>${code}</code>\n\n<i>Masukkan kode ini di aplikasi WhatsApp Anda.</i>`;
             const kbd = Markup.inlineKeyboard([[Markup.button.callback("🔁 Try Again", `pair_try_${sessionId}`), Markup.button.callback("🛑 Cancel", `pair_cancel_${sessionId}`)]]);
             if (pairingMessageTracker[sessionId]) {
                 await ctx.telegram.editMessageText(ctx.chat!.id, pairingMessageTracker[sessionId], undefined, text, { parse_mode: "HTML", ...kbd }).catch(()=>{});
@@ -430,7 +460,7 @@ async function startUserBotSession(ctx: Context | null, userId: number, phone: s
       onConnected: async () => {
         upsertBot(userId, { id: sessionId, phoneNumber: phone, isActive: true, addedAt: new Date().toISOString(), pairingStatus: "connected", lastError: null });
         if (ctx) {
-            const text = `✅ <b>KONEKSI BERHASIL</b>\n───────────────\n👤 <b>Sender:</b> <code>${phone}</code>\n\n✅ Berhasil terhubung dan siap digunakan!`;
+            const text = `✅ <b>KONEKSI BERHASIL</b>\n───────────────\n👤 <b>Sender:</b> <code>${phone}</code>\n\n✅ Perangkat berhasil terhubung dan siap digunakan!`;
             if (pairingMessageTracker[sessionId]) {
                 await ctx.telegram.editMessageText(ctx.chat!.id, pairingMessageTracker[sessionId], undefined, text, { parse_mode: "HTML" }).catch(()=>{});
                 delete pairingMessageTracker[sessionId]; 
@@ -491,7 +521,7 @@ bot.action(/^pair_cancel_(.+)$/, async (ctx) => {
     await engine.cancelPairing(sessionId);
     removeBotFromUser(ctx.from.id, sessionId);
     await ctx.answerCbQuery("Pairing dibatalkan.").catch(() => {});
-    await ctx.editMessageText("🛑 <b>PAIRING DIBATALKAN</b>\n───────────────\nProses pairing telah dihentikan dan data dihapus.", { parse_mode: "HTML" }).catch(() => {});
+    await ctx.editMessageText("🛑 <b>PAIRING DIBATALKAN</b>\n───────────────\nProses pairing telah dihentikan dan data dihapus dari sistem.", { parse_mode: "HTML" }).catch(() => {});
   } catch(e) {}
 });
 
@@ -501,8 +531,12 @@ bot.action(/^start_bot_(.+)$/, async (ctx) => {
     const b = getUser(ctx.from.id)?.bots?.find((x) => x.id === sessionId);
     if (!b) return ctx.answerCbQuery("Bot tidak ditemukan", { show_alert: true });
 
-    pairingMessageTracker[sessionId] = ctx.callbackQuery.message!.message_id;
     await ctx.answerCbQuery("Memulai ulang bot...").catch(() => {});
+    
+    // Karena ini di-trigger dari panel Detail Bot (yang berupa Foto), 
+    // kita mengirim pesan Teks Baru untuk menghindari bentrok API.
+    const msg = await ctx.reply("⏳ Menghubungkan ke server WhatsApp...");
+    pairingMessageTracker[sessionId] = msg.message_id;
     await startUserBotSession(ctx, ctx.from.id, b.phoneNumber, sessionId);
   } catch(e) {}
 });
@@ -521,10 +555,9 @@ bot.action(/^detail_bot_(.+)$/, async (ctx) => {
     const kbd: any[][] = [];
     if (!isRuntimeConnected) {
       kbd.push([Markup.button.callback("▶️ Start / Restart Bot", `start_bot_${sessionId}`)]);
-      kbd.push([Markup.button.callback("🔁 Try Again", `pair_try_${sessionId}`), Markup.button.callback("🛑 Cancel", `pair_cancel_${sessionId}`)]);
     }
     kbd.push([Markup.button.callback("🗑 Hapus Bot", `delete_bot_${sessionId}`)]);
-    await ctx.editMessageText(detailText, { parse_mode: "HTML", ...Markup.inlineKeyboard(kbd) }).catch(() => {});
+    await ctx.editMessageCaption(detailText, { parse_mode: "HTML", ...Markup.inlineKeyboard(kbd) }).catch(() => {});
   } catch(e){}
 });
 
@@ -534,7 +567,7 @@ bot.action(/^delete_bot_(.+)$/, async (ctx) => {
     const sessionId = (ctx.match as RegExpExecArray)[1];
     await engine.deleteSession(sessionId).catch(console.error);
     removeBotFromUser(ctx.from.id, sessionId);
-    await ctx.editMessageText("✅ <b>Bot berhasil dihapus.</b>", { parse_mode: "HTML" }).catch(() => {});
+    await ctx.editMessageCaption("✅ <b>Bot berhasil dihapus.</b>", { parse_mode: "HTML" }).catch(() => {});
   } catch(e){}
 });
 
@@ -546,18 +579,18 @@ bot.action("mode_user", async (ctx) => {
     const actives = (getUser(ctx.from.id)?.bots || []).filter((b) => b.isActive && engine.isSessionConnected(b.id));
 
     if (actives.length === 0) {
-      await ctx.editMessageText("❌ <b>TIDAK ADA BOT AKTIF</b>\n───────────────\nSilakan tambahkan atau nyalakan bot terlebih dahulu.", { parse_mode: "HTML" }).catch(() => {});
+      await ctx.editMessageCaption("❌ <b>TIDAK ADA BOT AKTIF</b>\n───────────────\nSilakan tambahkan atau nyalakan bot Anda terlebih dahulu.", { parse_mode: "HTML" }).catch(() => {});
       return;
     }
     if (actives.length === 1) {
       ctx.session.pendingCheck = { mode: "user", botId: actives[0].id, botPhone: actives[0].phoneNumber };
-      await ctx.editMessageText("📄 <b>KIRIM DAFTAR NOMOR</b>\n───────────────\nKirim nomor yang ingin dicek (teks atau file .txt, maks 500).", {parse_mode: "HTML"}).catch(() => {});
+      await ctx.editMessageCaption("📄 <b>KIRIM DAFTAR NOMOR</b>\n───────────────\nKirim nomor yang ingin dicek (teks manual atau file .txt, maksimal 500 nomor per sesi).", {parse_mode: "HTML"}).catch(() => {});
       return;
     }
 
     const keyboard: any[][] = [];
     actives.forEach((b) => keyboard.push([Markup.button.callback(`Pilih ${b.phoneNumber}`, `select_bot_${b.id}`)]));
-    await ctx.editMessageText("📱 <b>PILIH BOT AKTIF</b>\n───────────────", {parse_mode: "HTML", ...Markup.inlineKeyboard(keyboard)}).catch(() => {});
+    await ctx.editMessageCaption("📱 <b>PILIH BOT AKTIF</b>\n───────────────\nPilih nomor pengirim yang ingin digunakan:", {parse_mode: "HTML", ...Markup.inlineKeyboard(keyboard)}).catch(() => {});
   } catch(e){}
 });
 
@@ -569,7 +602,7 @@ bot.action(/^select_bot_(.+)$/, async (ctx) => {
     if (!b || !(b.isActive && engine.isSessionConnected(b.id))) return ctx.answerCbQuery("Bot offline", { show_alert: true });
 
     ctx.session.pendingCheck = { mode: "user", botId: b.id, botPhone: b.phoneNumber };
-    await ctx.editMessageText("📄 <b>KIRIM DAFTAR NOMOR</b>\n───────────────\nKirim nomor yang ingin dicek (teks atau file .txt, maks 500).", {parse_mode: "HTML"}).catch(() => {});
+    await ctx.editMessageCaption("📄 <b>KIRIM DAFTAR NOMOR</b>\n───────────────\nKirim nomor yang ingin dicek (teks manual atau file .txt, maksimal 500 nomor per sesi).", {parse_mode: "HTML"}).catch(() => {});
   } catch(e){}
 });
 
@@ -577,11 +610,11 @@ bot.action("mode_global", async (ctx) => {
   try {
     await ctx.answerCbQuery().catch(() => {});
     if (!globalSessionReady || !engine.isSessionConnected(GLOBAL_SESSION_ID)) {
-      await ctx.editMessageText("❌ Global sender sedang offline.").catch(() => {});
+      await ctx.editMessageCaption("❌ Global sender sedang offline atau dalam perbaikan.").catch(() => {});
       return;
     }
     ctx.session.pendingCheck = { mode: "global", botId: GLOBAL_SESSION_ID };
-    await ctx.editMessageText("📄 <b>KIRIM DAFTAR NOMOR</b>\n───────────────\nKirim nomor yang ingin dicek (teks atau file .txt, maks 500).", {parse_mode:"HTML"}).catch(() => {});
+    await ctx.editMessageCaption("📄 <b>KIRIM DAFTAR NOMOR</b>\n───────────────\nKirim nomor yang ingin dicek (teks manual atau file .txt, maksimal 500 nomor per sesi).", {parse_mode:"HTML"}).catch(() => {});
   } catch(e){}
 });
 
@@ -701,6 +734,7 @@ bot.action(/^dlcat_([^_]+)_(.+?)_(.+)$/, async (ctx) => {
 
 /* ===================== LOGIC CEK BIO ===================== */
 
+// PENTING: Proses loading menggunakan Teks biasa agar lebih ringan
 async function handleCheckNumbers(ctx: BotContext, textContent: string) {
   if (!ctx.session.pendingCheck) return;
   const pending = ctx.session.pendingCheck;
@@ -712,7 +746,7 @@ async function handleCheckNumbers(ctx: BotContext, textContent: string) {
   const max = 500; 
   if (numbers.length > max) return ctx.reply(`❌ Ditemukan ${numbers.length} nomor. Maksimal ${max} nomor dalam sekali cek.`);
 
-  const progress = await ctx.reply("⏳ <b>PROSES CEK BIO SEDANG BERJALAN!</b>\n───────────────\nMohon tunggu, sistem sedang memeriksa daftar nomor...", {parse_mode:"HTML"});
+  const progress = await ctx.reply("⏳ <b>PROSES CEK BIO SEDANG BERJALAN!</b>\n───────────────\nMohon tunggu, sistem sedang memeriksa daftar nomor secara detail dan akurat...", {parse_mode:"HTML"});
   
   try {
     const start = Date.now();
@@ -725,7 +759,7 @@ async function handleCheckNumbers(ctx: BotContext, textContent: string) {
     const item: CheckHistoryItem = { id: reportId, userId: ctx.from!.id, mode: pending.mode, botPhone: pending.botPhone, timestamp: new Date().toISOString(), totalNumbers: result.total_checked, durationMs, fullResult: result };
     addHistoryItem(item);
 
-    await ctx.telegram.editMessageText(ctx.chat!.id, progress.message_id, undefined, `✅ <b>PROSES CEK BIO SELESAI!</b>\n───────────────\nLaporan hasil cek bio telah berhasil disusun dan dikirim di bawah ini:`, {parse_mode:"HTML"}).catch(()=>{});
+    await ctx.telegram.editMessageText(ctx.chat!.id, progress.message_id, undefined, `✅ <b>PROSES CEK BIO SELESAI!</b>\n───────────────\nLaporan hasil cek bio telah berhasil disusun. Anda dapat mengunduh dokumen laporan di pesan berikutnya.`, {parse_mode:"HTML"}).catch(()=>{});
 
     const txtBuffer = generateTxtReport(result, reportId);
     await ctx.replyWithDocument(
@@ -753,7 +787,8 @@ bot.on(message("document"), async (ctx) => {
     return ctx.reply("❌ Silakan kirim file dengan format .txt");
   }
 
-  const waitMsg = await ctx.reply("⏳ Membaca file...");
+  // Menggunakan teks biasa untuk loading baca file
+  const waitMsg = await ctx.reply("⏳ Membaca dan memproses file dokumen Anda...");
   try {
     const fileUrl = await ctx.telegram.getFileLink(doc.file_id);
     const response = await axios.get(fileUrl.href);
@@ -761,7 +796,7 @@ bot.on(message("document"), async (ctx) => {
     await ctx.telegram.deleteMessage(ctx.chat.id, waitMsg.message_id).catch(()=>{});
     await handleCheckNumbers(ctx, fileContent);
   } catch (e) {
-    await ctx.telegram.editMessageText(ctx.chat.id, waitMsg.message_id, undefined, "❌ Gagal membaca file.").catch(()=>{});
+    await ctx.telegram.editMessageText(ctx.chat.id, waitMsg.message_id, undefined, "❌ Gagal membaca atau memproses file dokumen.").catch(()=>{});
   }
 });
 
@@ -785,7 +820,8 @@ bot.on(message("text"), async (ctx) => {
     const sessionId = `user_${userId}_${phone}`;
     upsertBot(userId, { id: sessionId, phoneNumber: phone, isActive: false, addedAt: new Date().toISOString(), pairingStatus: "pending_pairing" });
 
-    const msg = await ctx.reply("⏳ Menghubungkan ke server...");
+    // Menggunakan teks biasa untuk loading koneksi
+    const msg = await ctx.reply("⏳ Menghubungkan ke server WhatsApp...");
     pairingMessageTracker[sessionId] = msg.message_id;
     await startUserBotSession(ctx, userId, phone, sessionId);
     return;
