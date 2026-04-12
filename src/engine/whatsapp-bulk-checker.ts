@@ -127,7 +127,7 @@ export interface SessionPairingInfo {
  * Utils
  * ======================================================= */
 
-const logger = P({ level: "trace" });
+const logger = P({ level: "silent" }); // Kurangi log noise dari Baileys
 
 const SESSION_ROOT = path.join(process.cwd(), "sessions");
 if (!fs.existsSync(SESSION_ROOT)) fs.mkdirSync(SESSION_ROOT, { recursive: true });
@@ -182,6 +182,7 @@ function parseBusinessVerification(profile: unknown): {
   const businessName = (p.description as string | undefined) ?? (p.businessName as string | undefined) ?? (p.name as string | undefined) ?? null;
   const verifiedName = (p.verified_name as string | undefined) ?? (p.verifiedName as string | undefined) ?? ((p.profileOptions as Record<string, unknown> | undefined)?.verified_name as string | undefined) ?? null;
   const rawLabel = (p.verificationLabel as string | undefined) ?? (p.verified_level as string | undefined) ?? ((p.profileOptions as Record<string, unknown> | undefined)?.verificationLabel as string | undefined) ?? ((p.profileOptions as Record<string, unknown> | undefined)?.verified_level as string | undefined) ?? null;
+  
   const labelText = rawLabel ? String(rawLabel).toLowerCase() : "";
   const isMetaVerified = Boolean(verifiedName) || labelText.includes("meta verified") || labelText.includes("verified");
   const isOfficialBusinessAccount = labelText.includes("official business account") || labelText.includes("oba") || Boolean(p.isOfficialBusinessAccount) || Boolean(p.officialBusinessAccount);
@@ -251,22 +252,24 @@ class SessionManager {
     runtime.pairingAttempts += 1;
 
     try {
-      console.log(`⏳ [DEBUG] MEMINTA KODE PAIRING UNTUK NOMOR: ${runtime.pairingPhone}...`);
+      console.log(`⏳ [DEBUG] Meminta kode pairing untuk ${runtime.pairingPhone}...`);
+      const rawCode = await runtime.sock.requestPairingCode(runtime.pairingPhone);
       
-      const code = await runtime.sock.requestPairingCode(runtime.pairingPhone);
+      // FORMAT KODE: Pisahkan dengan tanda strip (-) di tengah agar mudah dibaca
+      const formattedCode = rawCode?.match(/.{1,4}/g)?.join('-') || rawCode;
       
-      runtime.pairingCode = code;
+      runtime.pairingCode = formattedCode;
       runtime.pairingStatus = "code_sent";
       runtime.lastError = null;
-      console.log(`✅ [DEBUG] KODE PAIRING BERHASIL DIDAPATKAN: ${code}`);
+      console.log(`✅ [DEBUG] Kode didapat: ${formattedCode}`);
 
       if (options?.onPairingCode) {
-        await options.onPairingCode(runtime.config.sessionId, code);
+        await options.onPairingCode(runtime.config.sessionId, formattedCode);
       }
-      return code;
+      return formattedCode;
     } catch (e: unknown) {
       const errorMsg = e instanceof Error ? e.message : JSON.stringify(e);
-      console.error(`❌ [DEBUG] GAGAL MEMINTA KODE PAIRING! ALASAN:`, errorMsg);
+      console.error(`❌ [DEBUG] Gagal meminta kode:`, errorMsg);
 
       runtime.pairingStatus = "failed";
       runtime.lastError = errorMsg;
@@ -284,8 +287,6 @@ class SessionManager {
     const existing = this.sessions.get(config.sessionId);
     if (existing) return existing;
 
-    console.log(`🔄 [DEBUG] Inisialisasi Session: ${config.sessionId}`);
-
     const authDir = this.getSessionAuthDir(config.sessionId);
     fs.mkdirSync(authDir, { recursive: true });
 
@@ -296,12 +297,13 @@ class SessionManager {
       auth: state,
       version,
       printQRInTerminal: false,
-      logger: P({ level: "trace" }), 
+      logger, 
       browser: ["Ubuntu", "Chrome", "20.0.04"], 
       markOnlineOnConnect: false,
       generateHighQualityLinkPreview: false,
       syncFullHistory: false,
-      defaultQueryTimeoutMs: 20_000,
+      defaultQueryTimeoutMs: 30_000, // Timeout ditingkatkan agar lebih toleran
+      keepAliveIntervalMs: 25_000,   // Ping rutin untuk menjaga sesi tetap hidup
     });
 
     sock.ev.on("creds.update", saveCreds);
@@ -324,16 +326,12 @@ class SessionManager {
       const { connection, lastDisconnect } = update;
       runtime.lastSeenAt = Date.now();
 
-      if (connection) {
-        console.log(`📡 [DEBUG] Status Koneksi WhatsApp: ${connection}`);
-      }
-
       if (connection === "open") {
         runtime.isConnected = true;
         runtime.pairingCode = null;
         runtime.pairingStatus = "connected";
         runtime.lastError = null;
-        console.log(`✅ [DEBUG] [${config.sessionId}] KONEKSI TERBUKA (BERHASIL TAUTAN!)`);
+        console.log(`✅ [${config.sessionId}] Terhubung stabil.`);
 
         if (options?.onConnected) {
           await options.onConnected(config.sessionId);
@@ -344,41 +342,27 @@ class SessionManager {
         runtime.isConnected = false;
         const boomError = lastDisconnect?.error as Boom;
         const statusCode = boomError?.output?.statusCode ?? null;
-        const errorMessage = boomError?.message || JSON.stringify(boomError);
+        
         const isLoggedOut = statusCode === DisconnectReason.loggedOut;
-
-        console.warn(`⚠️ [DEBUG] [${config.sessionId}] KONEKSI TERPUTUS. Code: ${statusCode}, Error: ${errorMessage}`);
+        runtime.lastDisconnectCode = statusCode;
 
         if (isLoggedOut) {
+          console.warn(`🛑 [${config.sessionId}] Perangkat Logged Out. Sesi dihapus.`);
           runtime.pairingStatus = "logged_out";
-          runtime.lastError = "Logged out / auth invalid";
-
-          if (options?.onFailed) {
-            await options.onFailed(config.sessionId, runtime.lastError);
-          }
-
+          runtime.lastError = "Logged out dari perangkat";
+          if (options?.onFailed) await options.onFailed(config.sessionId, runtime.lastError);
           await this.deleteSession(config.sessionId);
           return;
         }
 
-        // === PERBAIKAN UTAMA DI SINI ===
-        if (statusCode === DisconnectReason.restartRequired) {
-            console.log(`🔄 [DEBUG] [${config.sessionId}] Memulai ulang sesi otomatis karena WA meminta restart (Kode 515)...`);
-            // Hapus sesi saat ini agar tidak tumpang tindih
-            this.sessions.delete(config.sessionId);
-            
-            // Jeda 2 detik lalu jalankan initSession lagi
-            setTimeout(() => {
-                this.initSession(config, options).catch(e => console.error("Auto-restart error:", e));
-            }, 2000);
-        } else {
-            // Jika terputus karena error lain (Timeout/Network)
-            runtime.pairingStatus = "failed";
-            runtime.lastError = `Disconnected code=${statusCode ?? "unknown"}`;
-            if (options?.onFailed) {
-              await options.onFailed(config.sessionId, runtime.lastError);
-            }
-        }
+        // AUTO RECONNECT AGRESSIVE UNTUK MENJAGA STABILITAS SESI (Selama bukan log out manual)
+        console.log(`🔄 [${config.sessionId}] Sesi terputus (Code: ${statusCode}). Melakukan reconnect otomatis...`);
+        this.sessions.delete(config.sessionId); 
+        
+        // Jeda waktu yang eksponensial/acak untuk menghindari deteksi spam restart
+        setTimeout(() => {
+            this.initSession(config, options).catch(e => console.error("Auto-restart error:", e));
+        }, randomBetween(3000, 7000));
       }
     });
 
@@ -388,15 +372,11 @@ class SessionManager {
     }
 
     if (!sock.authState.creds.registered) {
-      if (!runtime.pairingPhone) {
-        console.warn(`⚠️ [DEBUG] [${config.sessionId}] phoneNumber tidak diberikan untuk pairing`);
-      } else {
+      if (runtime.pairingPhone) {
         setTimeout(async () => {
           try {
             await this.requestPairingCode(runtime, options);
-          } catch (e) {
-            console.error("❌ [DEBUG] Gagal requestPairingCode", e);
-          }
+          } catch (e) {}
         }, 3500);
       }
     } else {
@@ -408,11 +388,8 @@ class SessionManager {
 
   public async retryPairingCode(sessionId: string, phoneNumber?: string): Promise<string> {
     const runtime = this.sessions.get(sessionId);
-    if (!runtime) throw new Error(`Session ${sessionId} not found di memory`);
-
+    if (!runtime) throw new Error(`Sesi tidak aktif.`);
     if (phoneNumber) runtime.pairingPhone = sanitizePhone(phoneNumber);
-    if (!runtime.pairingPhone) throw new Error("phoneNumber required");
-
     return this.requestPairingCode(runtime);
   }
 
@@ -421,26 +398,17 @@ class SessionManager {
     if (runtime) {
         runtime.pairingStatus = "cancelled";
         runtime.pairingCode = null;
-        try {
-          runtime.sock.end(new Error("Pairing cancelled by user"));
-        } catch { /* Ignore */ }
+        try { runtime.sock.end(new Error("Pairing cancelled")); } catch {}
     }
     await this.deleteSession(sessionId);
   }
 
   public async restartSession(sessionId: string, options?: InitSessionOptions): Promise<void> {
     const old = this.sessions.get(sessionId);
-    if (!old) throw new Error(`Session ${sessionId} not found`);
-
-    try {
-      old.sock.end(new Error("Manual restart"));
-    } catch { /* Ignore */ }
-    
+    if (!old) throw new Error(`Sesi tidak aktif.`);
+    try { old.sock.end(new Error("Manual restart")); } catch {}
     this.sessions.delete(sessionId);
-    await this.initSession(old.config, {
-      ...options,
-      phoneNumber: options?.phoneNumber ?? old.pairingPhone ?? undefined,
-    });
+    await this.initSession(old.config, { ...options, phoneNumber: options?.phoneNumber ?? old.pairingPhone ?? undefined });
   }
 
   public async deleteSession(sessionId: string): Promise<void> {
@@ -449,24 +417,17 @@ class SessionManager {
       try {
         s.sock.logout();
         s.sock.end(new Error("Session deleted"));
-      } catch { /* Ignore */ }
+      } catch {}
       this.sessions.delete(sessionId);
     }
     this.queues.delete(sessionId);
-
     const authDir = this.getSessionAuthDir(sessionId);
-    if (fs.existsSync(authDir)) {
-      fs.rmSync(authDir, { recursive: true, force: true });
-    }
+    if (fs.existsSync(authDir)) fs.rmSync(authDir, { recursive: true, force: true });
   }
 
-  public enqueueCheck(
-    sessionId: string,
-    numbers: string[],
-    options?: CheckOptions
-  ): Promise<CheckSummary> {
+  public enqueueCheck(sessionId: string, numbers: string[], options?: CheckOptions): Promise<CheckSummary> {
     const queue = this.queues.get(sessionId);
-    if (!queue) throw new Error(`Queue for session ${sessionId} not initialized`);
+    if (!queue) throw new Error("Antrean tidak diinisialisasi");
 
     return new Promise<CheckSummary>((resolve, reject) => {
       queue.tasks.push({
@@ -479,23 +440,21 @@ class SessionManager {
       });
 
       if (!queue.processing) {
-        this.processQueue(sessionId).catch((e) => {
-          logger.error(e, `[${sessionId}] queue worker crashed`);
-        });
+        this.processQueue(sessionId).catch(() => {});
       }
     });
   }
 
   private async processQueue(sessionId: string): Promise<void> {
     const queue = this.queues.get(sessionId);
-    if (!queue) throw new Error(`Queue for session ${sessionId} not initialized`);
+    if (!queue) return;
     if (queue.processing) return;
 
     queue.processing = true;
     const runtime = this.sessions.get(sessionId);
     if (!runtime) {
       queue.processing = false;
-      throw new Error(`Session ${sessionId} not found`);
+      return;
     }
 
     while (queue.tasks.length > 0) {
@@ -510,13 +469,12 @@ class SessionManager {
         runtime.isBusy = false;
       }
     }
-
     queue.processing = false;
   }
 }
 
 /* =========================================================
- * Core Bulk Checker
+ * Core Bulk Checker (EVALUASI ANTI-SPAM & AKURASI DATA)
  * ======================================================= */
 
 async function checkSingleNumber(
@@ -528,6 +486,7 @@ async function checkSingleNumber(
   const jid = toJid(phone);
 
   try {
+    // 1. Cek apakah nomor terdaftar
     const waCheck = await withTimeout(sock.onWhatsApp(jid), timeoutMs, "onWhatsApp timeout");
     const isRegistered = Array.isArray(waCheck) && waCheck.length > 0 && Boolean(waCheck[0]?.exists);
 
@@ -535,6 +494,10 @@ async function checkSingleNumber(
       return { phone, jid, isRegistered: false, bio: null, type: "unknown", businessName: null, verifiedName: null, isMetaVerified: false, isOfficialBusinessAccount: false, verificationLabel: null };
     }
 
+    // JEDA ANTI-SPAM PENTING: Mencegah Rate-Limit WhatsApp yang menyebabkan Bio kosong (0)
+    await sleep(randomBetween(500, 1000));
+
+    // 2. Mengambil BIO (Status)
     let bio: string | null = null;
     try {
       const statusResult = await withTimeout(sock.fetchStatus(jid), timeoutMs, "fetchStatus timeout");
@@ -542,10 +505,16 @@ async function checkSingleNumber(
         bio = statusResult;
       } else if (statusResult && typeof statusResult === "object") {
         const maybeObj = statusResult as { status?: unknown };
-        bio = typeof maybeObj.status === "string" ? maybeObj.status : null;
+        if (typeof maybeObj.status === "string") bio = maybeObj.status;
       }
-    } catch { /* ignore */ }
+    } catch (e: unknown) {
+       // Abaikan error 401 (Privasi Bio Tertutup) atau 404 (Tidak Punya Bio)
+    }
 
+    // JEDA ANTI-SPAM PENTING
+    await sleep(randomBetween(500, 1000));
+
+    // 3. Mengecek Akun Bisnis & Meta Verified
     let type: "business" | "regular" | "unknown" = "regular";
     let businessName: string | null = null;
     let verifiedName: string | null = null;
@@ -564,11 +533,13 @@ async function checkSingleNumber(
         isOfficialBusinessAccount = parsed.isOfficialBusinessAccount;
         verificationLabel = parsed.verificationLabel;
       }
-    } catch { /* ignore */ }
+    } catch { 
+      // Akan error 404 jika bukan akun bisnis, diabaikan (dianggap akun regular)
+    }
 
     return { phone, jid, isRegistered: true, bio, type, businessName, verifiedName, isMetaVerified, isOfficialBusinessAccount, verificationLabel };
   } catch (error: unknown) {
-    return { phone, jid, isRegistered: false, bio: null, type: "unknown", businessName: null, verifiedName: null, isMetaVerified: false, isOfficialBusinessAccount: false, verificationLabel: null, error: error instanceof Error ? error.message : "Unknown check error" };
+    return { phone, jid, isRegistered: false, bio: null, type: "unknown", businessName: null, verifiedName: null, isMetaVerified: false, isOfficialBusinessAccount: false, verificationLabel: null, error: error instanceof Error ? error.message : "Timeout" };
   }
 }
 
@@ -578,15 +549,18 @@ async function runBulkCheck(
   opts?: CheckOptions
 ): Promise<CheckSummary> {
   if (!runtime.isConnected) {
-    throw new Error(`Session ${runtime.config.sessionId} is not connected`);
+    throw new Error(`Koneksi server bot sedang terputus.`);
   }
 
   const startedAt = new Date();
-  const batchSize = opts?.batchSize ?? 5;
-  const concurrencyPerBatch = opts?.concurrencyPerBatch ?? 3;
-  const minBatchDelayMs = opts?.minBatchDelayMs ?? 500;
-  const maxBatchDelayMs = opts?.maxBatchDelayMs ?? 1500;
-  const perNumberTimeoutMs = opts?.perNumberTimeoutMs ?? 8000;
+  
+  // MENGURANGI BEBAN PARALEL AGAR DATA AKURAT & TIDAK CRASH
+  // Proses berjalan lebih stabil (batch lebih kecil tapi konsisten)
+  const batchSize = opts?.batchSize ?? 3;
+  const concurrencyPerBatch = opts?.concurrencyPerBatch ?? 1; // Memastikan request WA murni sekuensial
+  const minBatchDelayMs = opts?.minBatchDelayMs ?? 1500;
+  const maxBatchDelayMs = opts?.maxBatchDelayMs ?? 3000;
+  const perNumberTimeoutMs = opts?.perNumberTimeoutMs ?? 10000;
 
   const cleanNumbers = phoneNumbersArray.map(sanitizePhone).filter(Boolean);
   const batches = chunkArray(cleanNumbers, batchSize);
@@ -598,12 +572,13 @@ async function runBulkCheck(
     const batchResults = await Promise.all(
       batch.map((phone) =>
         limit(async () => {
-          await sleep(randomBetween(80, 250));
           return checkSingleNumber(runtime.sock, phone, perNumberTimeoutMs);
         })
       )
     );
     details.push(...batchResults);
+    
+    // Istirahat antar batch agar server WA bernapas
     if (i < batches.length - 1) {
       await sleep(randomBetween(minBatchDelayMs, maxBatchDelayMs));
     }
@@ -681,8 +656,8 @@ export class WhatsAppBulkCheckerEngine {
     options?: CheckOptions
   ): Promise<CheckSummary> {
     const session = this.sessionManager.getSession(sessionId);
-    if (!session) throw new Error(`Session ${sessionId} not found`);
-    if (!session.isConnected) throw new Error(`Session ${sessionId} is not connected`);
+    if (!session) throw new Error(`Sesi tidak aktif.`);
+    if (!session.isConnected) throw new Error(`Sesi sedang offline/mencoba menghubungkan ulang.`);
     return this.sessionManager.enqueueCheck(sessionId, phoneNumbersArray, options);
   }
 }
